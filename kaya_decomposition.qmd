@@ -1,0 +1,1714 @@
+---
+title: "Kaya Decomposition: Rozklad emisí CO₂ pro vybrané státy"
+author: "Romana Pejcalová"
+date: "2026-06-09"
+lang: cs
+execute:
+  warning: false
+  message: false
+  execute-dir: file
+format:
+  html:
+    theme: journal
+    toc: true
+    toc-depth: 3
+    toc-location: right
+    embed-resources: true
+    number-sections: true
+    number-depth: 3
+    code-fold: true
+    code-summary: "Zobrazit kód"
+    crossref:
+      fig-title: "Obrázek"
+      tbl-title: "Tabulka"
+    smooth-scroll: true
+    code-copy: true
+    google-analytics: "G-KJTWZJGXRQ"
+editor: visual
+---
+
+```{css, echo=FALSE}
+h1, h2, h3, h4, h5, h6 {
+  color: #007B3DFF;
+}
+
+h3 {
+  font-size: 1.2rem;
+}
+
+figcaption,
+.figure-caption,
+.quarto-float-caption-inner {
+  text-align: center !important;
+  color: #6c757d;
+  font-size: 0.95em;
+  text-align: left;
+}
+
+figure.quarto-float-tbl figcaption.quarto-float-caption-top {
+  text-align: left !important;
+  color: #6c757d;
+  font-size: 0.95em;
+}
+
+table caption {
+  text-align: left !important;
+  color: #6c757d;
+  font-size: 0.95em;
+}
+
+table th {
+  text-align: center !important;
+  vertical-align: middle !important;
+}
+```
+
+```{r setup}
+#| echo: false
+# Potřebné knihovny
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(readr)
+library(ggplot2)
+library(scales)
+library(cluster)
+library(factoextra)
+library(plotly)
+library(corrplot)
+library(ggrepel)
+library(forcats)
+library(modelsummary)
+
+# Požadované téma ggplot
+theme_set(theme_minimal())
+
+# Požadovaná škála barev
+barvy <- c('#D51317', '#F39200', '#EFD500', '#95C11F', '#007B3DFF', '#31B7BC', '#0094CD')
+
+# Czech locations
+loc <- Sys.setlocale(locale = "Czech")
+options(OutDec = ",")
+
+# Barvy odpovídající originálnímu grafu GCP (české názvy faktorů)
+barvy_kaya <- c(
+  "Populace"        = "#EFD500",
+  "HDP/obyvatele"   = "#F39200",
+  "Energie/HDP"     = "#007B3DFF",
+  "CO₂/Energie"     = "#31B7BC",
+  "Interakce"       = "#8c8c8c",
+  "Fosilní CO₂"     = "#222222"
+)
+
+# Pomocná funkce překladu názvů faktorů
+preloz_faktory <- function(x) {
+  recode(x,
+    "d_pop"    = "Populace",
+    "d_gdp_pc" = "HDP/obyvatele",
+    "d_ei"     = "Energie/HDP",
+    "d_ci"     = "CO₂/Energie",
+    "interactions" = "Interakce",
+    "pop_mean" = "Populace",
+    "gdp_mean" = "HDP/obyvatele",
+    "ei_mean"  = "Energie/HDP",
+    "ci_mean"  = "CO₂/Energie"
+  )
+}
+
+# Fce na odstranění diakritiky
+remove_accents <- function(s) {
+    
+    # 1 character substitutions
+    old1 <- "áéěíýóúůčďňřšťž"
+    new1 <- "aeeiyouucdnrstz"
+    s1 <- chartr(old1, new1, s)
+    
+    # 2 character substitutions 
+    old2 <- c("ß")
+    new2 <- c("ss")
+    s2 <- s1
+    
+    # finalize the function
+    for(i in seq_along(old2)) s2 <- gsub(old2[i], new2[i], s2, fixed = TRUE)
+    
+    s2
+}
+```
+
+```{r load-data}
+#| echo: false
+## --- Hlavní dataset (OWID) ---
+
+# Kompilace Our World in Data, kde co2 pochází primárně z Global Carbon Project (GCP)
+# OWID – Our World in Data je akademická organizace (Oxford), transparentně dokumentují metodiku a dataset je citovaný v recenzované literatuře.
+# Z hlediska reprodukovatelnosti: URL vždy stahuje nejnovější verzi, takže při re-renderu za půl roku mohou být čísla jiná (OWID průběžně backfilluje historická data při vydání nové edice GCP)!
+# Doporučené řešení – připnout ke konkrétnímu commitu, nebo uložit lokálně.
+
+url_owid <- "https://raw.githubusercontent.com/owid/co2-data/master/owid-co2-data.csv"
+owid_raw <- read_csv(url_owid, show_col_types = FALSE)
+
+# Kontinent podle ISO 3166 (UN Statistics Division)
+kontinent_lookup <- read_csv(
+  "https://raw.githubusercontent.com/lukes/ISO-3166-Countries-with-Regional-Codes/master/all/all.csv",
+  show_col_types = FALSE
+) |>
+  select(iso_code = `alpha-3`, kontinent = region) |>
+  mutate(kontinent = recode(kontinent,
+    "Africa"   = "Afrika",
+    "Americas" = "Amerika",
+    "Asia"     = "Asie",
+    "Europe"   = "Evropa",
+    "Oceania"  = "Oceánie"
+  ))
+
+# Pouze státy (ne agregáty OWID_*), roky 1989–2024 (1989 potřeba pro první diferenci)
+owid <- owid_raw |>
+  filter(!is.na(iso_code),
+         !grepl("^OWID_", iso_code),
+         year %in% (1989:2024)) |>
+  select(iso_code, country, year,
+         co2,                  # CO₂ z fosilních paliv (Mt CO₂) -> *1e6
+         gdp,                  # HDP, konstantní USD 2011 (PPP)
+         population,           # obavatelstvo (absolutní hodnota)
+         energy_per_gdp,       # primární energie / HDP (kWh / USD)
+         co2_per_unit_energy   # emisní intenzita energie (kg CO₂ / kWh)
+  ) |>
+  left_join(kontinent_lookup, by = "iso_code") |>
+    mutate(kontinent = case_when(
+      iso_code == "TWN" ~ "Asie",
+      iso_code == "ATA" ~ "Antarktida",  # nebo vyřadit
+      TRUE ~ kontinent
+      )
+    )
+```
+
+```{r exporteri}
+#| echo: false
+#| cache: true
+## --- Klasifikace čistých exportérů fosilních paliv z OWID energy dat ---
+
+# Čistý vývozce = produkce > spotřeba (průměr 2010–2019)
+# Zdroj: Our World in Data – Energy Data (github.com/owid/energy-data)
+owid_energy_raw <- readr::read_csv(
+  "https://raw.githubusercontent.com/owid/energy-data/master/owid-energy-data.csv",
+  show_col_types = FALSE
+)
+
+net_mean <- function(prod, cons) {
+  if (all(is.na(prod)) & all(is.na(cons))) {
+    return(NA_real_)
+  }
+
+  mean(
+    coalesce(prod, 0) - coalesce(cons, 0),
+    na.rm = TRUE
+  )
+}
+
+exporteri_owid <- owid_energy_raw |>
+  filter(!is.na(iso_code), !grepl("^OWID_", iso_code),
+                year %in% 2010:2019) |>
+  select(iso_code, year,
+                oil_production, oil_consumption,
+                gas_production, gas_consumption,
+                coal_production, coal_consumption) |>
+  group_by(iso_code) |>
+  summarise(
+    net_ropa = net_mean(oil_production, oil_consumption),
+    net_plyn = net_mean(gas_production, gas_consumption),
+    net_uhli = net_mean(coal_production, coal_consumption),
+    .groups = "drop"
+  ) |>
+  mutate(
+    vyvoz_ropa = case_when(
+      is.na(net_ropa) | is.nan(net_ropa) ~ NA,
+      net_ropa > 0 ~ TRUE,
+      TRUE ~ FALSE
+    ),
+    vyvoz_plyn = case_when(
+      is.na(net_plyn) | is.nan(net_plyn) ~ NA,
+      net_plyn > 0 ~ TRUE,
+      TRUE ~ FALSE
+    ),
+    vyvoz_uhli = case_when(
+      is.na(net_uhli) | is.nan(net_uhli) ~ NA,
+      net_uhli > 0 ~ TRUE,
+      TRUE ~ FALSE
+    ),
+  
+    fossil_role = factor(
+      case_when(
+        is.na(vyvoz_ropa) | is.na(vyvoz_plyn) | is.na(vyvoz_uhli) ~ NA_character_,
+        vyvoz_ropa | vyvoz_plyn | vyvoz_uhli ~ "Exportér FF",
+        TRUE ~ "Importér / neutrální"
+      ),
+      levels = c("Exportér FF", "Importér / neutrální")
+    )
+)
+```
+
+```{r klasifikace}
+#| echo: false
+# Příjmová skupina: průměrné HDP/obyvatele za 2010–2019
+gdp_pc_ref <- owid |>
+  filter(year %in% (2010:2019), !is.na(gdp), !is.na(population)) |>
+  mutate(gdp_pc = gdp / population) |>
+  group_by(iso_code, country) |>
+  summarise(gdp_pc_mean = mean(gdp_pc, na.rm = TRUE), .groups = "drop") |>
+  mutate(
+    income_group = case_when(
+      gdp_pc_mean >= 12000 ~ "Vysoký příjem",
+      gdp_pc_mean >=  4000 ~ "Vyšší střední příjem",
+      gdp_pc_mean >=  1000 ~ "Nižší střední příjem",
+      TRUE                 ~ "Nízký příjem"
+    ),
+    income_group = factor(income_group,
+      levels = c("Vysoký příjem", "Vyšší střední příjem",
+                 "Nižší střední příjem", "Nízký příjem"),
+      ordered = TRUE)
+  )
+
+# Exportéři fosilních paliv: OWID Energy Data (produkce − spotřeba, průměr 2010–2019)
+klasifikace <- gdp_pc_ref |>
+  left_join(
+    exporteri_owid |> select(iso_code, fossil_role,
+                                    vyvoz_ropa, vyvoz_plyn, vyvoz_uhli),
+    by = "iso_code"
+  ) |>
+  mutate(
+    fossil_role = if_else(
+      is.na(fossil_role),
+      factor("Importér / neutrální", levels = levels(fossil_role)),
+      fossil_role
+    ),
+    pure_fossil_exporter = vyvoz_ropa %in% TRUE & vyvoz_plyn %in% TRUE & vyvoz_uhli %in% TRUE
+  )
+```
+
+```{r kultura-data}
+#| echo: false
+#| cache: true
+
+# Helper: vektor ISO3 kódů → tibble
+.sk <- function(kody, nazev) tibble::tibble(iso_code = kody, skupina = nazev)
+
+# Jazyková rodina (hlavní úřední jazyk)
+# Zdroj: Ethnologue, CIA World Factbook
+jazyk_lookup <- bind_rows(
+  .sk(c("AUS","AUT","BEL","CAN","CHE","DEU","DNK","GBR","IRL","ISL",
+        "LUX","NLD","NOR","NZL","SWE","USA","ZAF"),              "Germánské"),
+  .sk(c("AGO","ARG","BOL","BRA","CHL","COL","CRI","CUB","DOM","ECU",
+        "ESP","FRA","GTM","HND","HTI","ITA","MEX","MOZ","NIC","PAN",
+        "PER","PRT","PRY","ROU","SLV","TTO","URY","VEN"),        "Románské"),
+  .sk(c("BIH","BGR","BLR","CZE","HRV","MKD","MNE","POL","RUS","SRB",
+        "SVK","SVN","UKR"),                                      "Slovanské"),
+  .sk(c("ARE","BHR","DJI","DZA","EGY","IRQ","JOR","KWT","LBN","LBY",
+        "MAR","MRT","OMN","QAT","SAU","SDN","SYR","TUN","YEM"),  "Arabské"),
+  .sk(c("AFG","BGD","IND","IRN","LKA","MDV","NPL","PAK","TJK"),  "Indo-íránské"),
+  .sk(c("BTN","CHN","MMR","TWN"),                                "Sino-tibetské"),
+  .sk(c("AZE","KAZ","KGZ","TKM","TUR","UZB"),                   "Turkické"),
+  .sk(c("FJI","IDN","MDG","MYS","PHL","PNG","SGP","TLS","WSM"),  "Austronézské"),
+  .sk(c("KHM","LAO","THA","VNM"),                                "Austroasijské"),
+  .sk(c("JPN","KOR","PRK"),                                      "Japonština / korejština"),
+  .sk(c("ETH","ERI","ISR","SOM"),                                "Afroasijské (ostatní)"),
+  .sk(c("EST","LTU","LVA"),                                      "Baltské"),
+  .sk(c("FIN","HUN"),                                            "Ugrofinské"),
+  .sk(c("ALB","ARM","GRC"),                                      "Ostatní IE"),
+  .sk(c("GEO"),                                                  "Jihokavkazské"),
+  .sk(c("MNG"),                                                  "Mongolské"),
+  .sk(c("BEN","BFA","BWA","CAF","CMR","COD","COG","CIV","GAB","GHA",
+        "GIN","GMB","GNB","GNQ","KEN","LBR","LSO","MLI","MWI","NAM",
+        "NER","NGA","RWA","SEN","SLE","SSD","SWZ","TCD","TGO","TZA",
+        "UGA","ZMB","ZWE"),                                      "Sub-saharská Afrika")
+) |> rename(jazyk_skupina = skupina)
+
+# Převažující náboženství
+# Zdroj: Pew Research Center, CIA World Factbook
+nabozenstvi_lookup <- bind_rows(
+  .sk(c("AGO","ARM","AUS","AUT","BEL","BGR","BLR","BOL","BRA","BWA",
+        "CAN","CHE","CHL","COD","COG","COL","CRI","CUB","CZE","DEU",
+        "DNK","DOM","ECU","ERI","ESP","ETH","FIN","FRA","GAB","GBR",
+        "GEO","GHA","GNQ","GRC","GTM","HND","HRV","HTI","HUN","IRL",
+        "ISL","ITA","KEN","LSO","LTU","LUX","LVA","MEX","MKD","MLT",
+        "MNE","MOZ","MWI","NAM","NIC","NLD","NOR","NZL","PAN","PER",
+        "PHL","PNG","POL","PRT","PRY","ROU","RUS","RWA","SLV","SRB",
+        "SVK","SVN","SWE","SWZ","TLS","TTO","UGA","UKR","URY","USA",
+        "VEN","ZAF","ZMB","ZWE"),                                "Křesťanství"),
+  .sk(c("AFG","ALB","ARE","AZE","BGD","BHR","DJI","DZA","EGY","GIN",
+        "GMB","GNB","IDN","IRN","IRQ","JOR","KAZ","KGZ","KWT","LBY",
+        "MAR","MDV","MLI","MRT","MYS","NER","OMN","PAK","QAT","SAU",
+        "SDN","SEN","SLE","SOM","SYR","TJK","TKM","TUN","TUR","UZB",
+        "YEM","BIH"),                                            "Islám"),
+  .sk(c("IND","MUS","NPL"),                                      "Hinduismus"),
+  .sk(c("BTN","KHM","LAO","LKA","MMR","MNG","THA"),             "Buddhismus"),
+  .sk(c("CHN","JPN","PRK","SGP","TWN","VNM"),                   "Smíšené / sekulární"),
+  .sk(c("BEN","BFA","CAF","CMR","CIV","LBN","MDG","NGA","SSD",
+        "TCD","TGO","TZA"),                                      "Smíšené"),
+  .sk(c("ISR"),                                                  "Judaismus")
+) |> rename(nabozenstvi = skupina)
+
+# Vzdělání: hrubá míra terciárního vzdělání, průměr 2010–2019 (World Bank WDI)
+# Zdroj: World Bank SE.TER.ENRR – vyžaduje: install.packages("WDI")
+edu_wdi <- if (requireNamespace("WDI", quietly = TRUE)) {
+  tryCatch(
+    WDI::WDI(indicator = c(tertiarni = "SE.TER.ENRR"),
+             start = 2010, end = 2019, extra = TRUE) |>
+      filter(!is.na(iso3c), region != "Aggregates") |>
+      group_by(iso_code = iso3c) |>
+      summarise(tertiarni_vzdelanost = mean(tertiarni, na.rm = TRUE),
+                       .groups = "drop"),
+    error = function(e) tibble::tibble(iso_code = character(),
+                                       tertiarni_vzdelanost = numeric())
+  )
+} else {
+  message("WDI není nainstalovaný – data vzdělání chybí. Spusť: install.packages('WDI')")
+  tibble::tibble(iso_code = character(), tertiarni_vzdelanost = numeric())
+}
+
+klasifikace_kultura <- jazyk_lookup |>
+  full_join(nabozenstvi_lookup, by = "iso_code") |>
+  left_join(edu_wdi, by = "iso_code") |>
+  mutate(
+    jazyk_skupina2 = case_when(
+      jazyk_skupina %in% c("Germánské", "Románské", "Slovanské",
+                           "Baltské", "Ostatní IE") ~ "Indoevropské",
+      jazyk_skupina %in% c("Arabské", "Afroasijské (ostatní)") ~ "Afroasijské",
+      jazyk_skupina %in% c("Sino-tibetské",
+                           "Japonština / korejština",
+                           "Mongolské") ~ "Východní Asie",
+      jazyk_skupina %in% c("Turkické",
+                           "Indo-íránské") ~ "Střední a západní Asie",
+      jazyk_skupina %in% c("Austronézské",
+                           "Austroasijské") ~ "Jihovýchodní Asie a Oceánie",
+      jazyk_skupina == "Sub-saharská Afrika" ~ "Subsaharská Afrika",
+      jazyk_skupina %in% c("Ugrofinské",
+                           "Jihokavkazské") ~ "Ostatní",
+      TRUE ~ NA_character_
+    )
+  )
+
+```
+
+# Úvod
+
+Emise oxidu uhličitého (CO₂) patří mezi hlavní příčiny probíhající změny klimatu. Jejich vývoj je ovlivňován řadou faktorů, mezi které patří populační růst, ekonomická úroveň, energetická náročnost výroby i uhlíková náročnost využívaných zdrojů energie. Pochopení významu jednotlivých faktorů je důležité nejen pro interpretaci minulého vývoje, ale také pro návrh účinných klimatických a energetických politik.
+
+Cílem této práce je analyzovat vývoj emisí CO₂ ve světě v letech 1990–2024 pomocí Kaya identity, která umožňuje rozložit změny emisí na příspěvky populace, HDP na obyvatele, energetické náročnosti ekonomiky a emisní náročnosti energie. Součástí analýzy je také srovnání různých skupin zemí, posouzení míry oddělení ekonomického růstu od emisí (decoupling) a identifikace typických emisních trajektorií pomocí shlukové analýzy.
+
+## Kaya dekompoice
+
+**Kaya dekompoice** (tzv. Kaya identita) je matematický vzorec vyvinutý japonským energetickým ekonomem Joičim Kayou. Používá se k analýze a vyčíslení hlavních faktorů ovlivňujících celkové emise skleníkových plynů (zejména CO₂) z lidské činnosti. Vzorec rozkládá celkové emise CO₂ rozkládá celkové emise na součin čtyř základních faktorů:
+
+$$\text{CO}_2 = P \times \frac{\text{HDP}}{P} \times \frac{E}{\text{HDP}} \times \frac{\text{CO}_2}{E}$$
+
+::: {#tbl-interpretace-koeficientu}
+| Faktor | Označení proměnné | Interpretace |
+|------------------------|------------------------|------------------------|
+| $\text{CO}_2$ | `co2` | Množství vyprodukovaného CO₂ (v mil.) |
+| $P$ | `population` | Populace - celkový počet obyvatel |
+| $\text{HDP}$ | `gdp` | Hrubý domácí produkt |
+| $\text{HDP}/P$ |  | HDP na obyvatele – úroveň ekonomické vyspělosti a blahobytu |
+| $E/\text{HDP}$ | `energy_per_gdp` | Energetická náročnost – množství energie potřebné k vytvoření jednotky HDP |
+| $\text{CO}_2/E$ | `co2_per_unit_energy` | Uhlíková náročnost – množství vyprodukovaného CO₂ na jednotku vyrobené energie |
+
+: Přehled faktorů a proměnných použitých v dekompozici emisí CO₂ pomocí identity Kaya
+:::
+
+Pokles emisí nastává, pokud pokles energetické nebo emisní intenzity převáží nad růstem populace a bohatství.
+
+### Log-lineární dekompozice (LMDI)
+
+Kaya dekompozice poskytuje pouze účetní rozpad. Pro určení toho, jakou měrou se každý faktor podílel na změně emisí v čase, se používá **log-lineární dekompozice**. Log-lineární přístup (indexová dekompozice pomocí logaritmického průměru neboli LMDI) transformuje multiplikativní vztah na aditivní.
+
+Zlogaritmováním Kaya identity získáme:
+
+$$\ln \text{CO}_2 = \ln P + \ln\frac{\text{HDP}}{P} + \ln\frac{E}{\text{HDP}} + \ln\frac{\text{CO}_2}{E}$$
+
+Změna emisí za určité období ($\Delta \text{CO}_2$) se pak rozkládá na sumu jednotlivých efektů, přičemž logaritmické průměry hodnot na začátku a na konci období představují váhy dílčího efektu. Meziroční změna se pak vyjádří jako:
+
+$$\underbrace{ \ln \text{CO}_2}_{\approx\,\%\Delta\text{CO}_2} \;=\; \underbrace{\Delta \ln\Delta P}_{\text{populace}} + \underbrace{\Delta \ln\frac{\text{HDP}}{P}}_{\text{bohatství}} + \underbrace{\Delta \ln\frac{E}{\text{HDP}}}_{\text{en. intenzita}} + \underbrace{\Delta \ln\frac{\text{CO}_2}{E}}_{\text{em. intenzita}}$$
+
+kde $\Delta \ln X_t = \ln X_t - \ln X_{t-1} = \ln (X_t / X_{t-1})$. Pro malé změny platí $\Delta \ln X \approx \frac{X_t - X_{t-1}}{X_{t-1}}$, tedy přibližně procentní změna. Výsledky jsou vynásobeny 100 a zobrazovány v jednotkách **% / rok**.
+
+Součet čtyř faktorů se přesně nerovná skutečné změně CO₂ – rozdíl tvoří **člen interakcí** (vícerozměrné nelinearity). U přesné LMDI metody interakce zmizí, ale vyžaduje iterativní výpočet. Pro explorativní účely jsou výsledky srovnatelné.
+
+Níže uvedený kód provádí výpočet dekompozice emisí CO₂ podle identity Kaya na úrovni jednotlivých zemí:
+
+```{r kaya-vypocet}
+# Výpočet Kaya dekompozice na úrovni jednotlivých zemí
+# Emise CO₂ jsou rozloženy na vliv populace, HDP na obyvatele,
+# energetické náročnosti ekonomiky a uhlíkové náročnosti energie.
+kaya <- owid |>
+  arrange(iso_code, year) |>
+  group_by(iso_code, country) |>
+  mutate(
+    # HDP na obyvatele
+    gdp_pc = gdp / population,
+
+    # Meziroční logaritmické změny jednotlivých faktorů (v %)
+    d_pop = (log(population) - log(lag(population))) * 100,
+    d_gdp_pc = (log(gdp_pc) - log(lag(gdp_pc))) * 100,
+    d_ei = (log(energy_per_gdp) - log(lag(energy_per_gdp))) * 100,
+    d_ci = (log(co2_per_unit_energy) - log(lag(co2_per_unit_energy))) * 100,
+
+    # Skutečná meziroční změna emisí CO₂
+    d_co2_actual = (log(co2) - log(lag(co2))) * 100,
+
+    # Změna emisí vysvětlená identitou Kaya
+    d_co2_sum = d_pop + d_gdp_pc + d_ei + d_ci,
+
+    # Nevysvětlená část způsobená numerickou aproximací
+    interactions = d_co2_actual - d_co2_sum
+  ) |>
+  ungroup() |>
+
+  # První rok nemá k dispozici meziroční změnu
+  filter(year >= 1990) |>
+
+  # Doplnění ekonomických, energetických a kulturních charakteristik zemí
+  left_join(
+    klasifikace |> select(iso_code, income_group, fossil_role, gdp_pc_mean),
+    by = "iso_code"
+  ) |>
+  left_join(klasifikace_kultura, by = "iso_code")
+```
+
+Níže je uveden kód funkce pro vykreslení grafu dekompozice emisí CO₂ podle identity Kaya:
+
+```{r kaya-funkce}
+# Funkce na vykreslení grafu kaya dekompozice
+plot_kaya <- function(data, nazev_statu, interaktivni = FALSE) {
+  df <- data |>
+    filter(country == nazev_statu, !is.na(d_co2_actual)) |>
+    select(year, d_pop, d_gdp_pc, d_ei, d_ci, interactions, d_co2_actual) |>
+    pivot_longer(c(d_pop, d_gdp_pc, d_ei, d_ci, interactions),
+                 names_to = "faktor", values_to = "hodnota") |>
+    mutate(faktor = preloz_faktory(faktor),
+           faktor = factor(faktor, levels = names(barvy_kaya)[1:5]))
+
+  co2_pts <- data |>
+    filter(country == nazev_statu, !is.na(d_co2_actual)) |>
+    select(year, d_co2_actual)
+
+  p <- ggplot() +
+    geom_col(data = df,
+             aes(x = year, y = hodnota, fill = faktor,
+                 text = paste0(faktor, ": ", round(hodnota, 2), 
+                               " %/rok<br>Rok: ", year)),
+             position = "stack", width = 0.7) +
+    geom_point(data = co2_pts,
+               aes(x = year, y = d_co2_actual, color = "Fosilní CO₂",
+                   text = paste0("Fosilní CO₂: ", round(d_co2_actual, 2), 
+                                 " %/rok<br>Rok: ", year)),
+               size = 1.8) +
+    geom_line(data = co2_pts, aes(x = year, y = d_co2_actual), 
+              color = '#222222') +
+    geom_hline(yintercept = 0, color = "gray40", linewidth = 0.4) +
+    scale_fill_manual(values = barvy_kaya[1:5], name = NULL) +
+    scale_color_manual(values = c("Fosilní CO₂" = "#222222"), name = NULL) +
+    guides(fill  = guide_legend(order = 1),
+           color = guide_legend(order = 2,
+                                override.aes = list(size = 2, linetype = 0,
+                                                    fill = NA))) +
+    scale_x_continuous(breaks = seq(1990, 2024, by = 5)) +
+    scale_y_continuous(labels = scales::label_percent(scale = 1)) +
+    labs(title = nazev_statu, x = NULL, y = "Přírůstek/rok") +
+    theme(legend.position = "bottom",
+          legend.key.size = unit(0.4, "cm"),
+          plot.title = element_text(face = "bold"))
+
+  if (interaktivni) {
+    p_ly <- ggplotly(p, tooltip = "text") |> config(displayModeBar = FALSE)
+    seen <- character()
+    for (i in seq_along(p_ly$x$data)) {
+      nm <- p_ly$x$data[[i]]$name
+      if (!is.null(nm) && nzchar(nm)) {
+        clean <- gsub("^\\((.+),\\s*\\d+\\)$", "\\1", nm)
+        clean <- gsub("CO2", "CO₂", clean)
+        p_ly$x$data[[i]]$name <- clean
+        if (clean %in% seen) {
+          p_ly$x$data[[i]]$showlegend <- FALSE
+        } else {
+          seen <- c(seen, clean)
+        }
+      }
+    }
+    p_ly
+  } else {
+    p
+  }
+}
+```
+
+## Zdroje dat
+
+::: {#tbl-zdroje}
+| Datová sada | Proměnné | Odkaz | Časové pokrytí |
+|------------------|------------------|------------------|------------------|
+| **Our World in Data (OWID) – CO₂ and GHG Emissions** | CO₂ z fosilních paliv, energetická intenzita, emisní intenzita, HDP (PPP, kons. USD 2011), populace | [github.com/owid/co2-data](https://github.com/owid/co2-data) | 1990–2023 |
+| **Global Carbon Project** | Teritoriální emise CO₂ (základ OWID datasetu) | [globalcarbonproject.org](https://www.globalcarbonproject.org/) | 1990–2023 |
+| **IEA World Energy Balances** | Primární spotřeba energie (základ OWID datasetu) | [iea.org](https://www.iea.org/data-and-statistics) | 1990–2023 |
+| **World Bank WDI** | HDP, populace (základ OWID datasetu) | [databank.worldbank.org](https://databank.worldbank.org/) | 1990–2023 |
+| **Our World in Data (OWID) – Energy data** | Produkce a spotřeba ropy, plynu a uhlí (klasifikace exportérů FF) | [github.com/owid/energy-data](https://github.com/owid/energy-data) | 2010–2019 (průměr) |
+| **World Bank WDI** | Míra terciárního vzdělání (SE.TER.ENRR) | [databank.worldbank.org](https://databank.worldbank.org/) | 2010–2019 (průměr) |
+| **Ethnologue / CIA World Factbook** | Jazyková rodina (hlavní úřední jazyk) | manuální lookup |  |
+| **Pew-Templeton Global Religious Futures Project** | Náboženský okruh | manuální lookup |  |
+
+: Přehled datových zdrojů použitých v analýze.
+:::
+
+### OWID - CO₂ Data
+
+Kompiluje Our World in Data; hodnoty CO₂ pocházejí primárně z Global Carbon Project (GCP). Dataset je průběžně aktualizován při vydání nové edice GCP – URL vždy stahuje nejnovější verzi.
+
+Z datasetu byly vyřazeny všechny agregátní záznamy (kódy začínající `^OWID_`) a ponechány **pouze** **suverénní státy** s ISO kódem. Dataset zahrnuje pozorování ze všech kontinentů. Největší zastoupení mají Afrika (25 %), Asie (23 %), Amerika (21 %) a Evropa (21 %), zatímco Oceánie (9 %) a Antarktida (\<1 %) jsou zastoupeny méně.
+
+**Časový rozsah** byl omezen na roky 1989–2024, přičemž rok 1989 je nutný pro výpočet první diference (změna v roce 1990). **Hodnoty CO₂** jsou v původním datasetu uvedeny v megatunách, proto byly přepočteny na tuny vynásobením hodnotou 1 000 000.
+
+```{r tbl-souhrne-CO2-statistiky}
+#| echo: false
+#| tbl-cap: "Souhrnné statistiky proměnných CO₂, HDP, populace a energetické efektivity."
+datasummary_skim(
+  owid |>
+    select(
+      co2,
+      gdp,
+      population,
+      energy_per_gdp,
+      co2_per_unit_energy
+    )
+  )
+```
+
+Dataset obsahuje několik tisíc unikátních hodnot pro všechny sledované proměnné. Počet chybějících hodnot je ve vztahu k velikosti datového souboru zanedbatelný – nejvíce (0,4 %) jich obsahují proměnné HDP a energetická náročnost ekonomiky. Histogramy naznačují široké rozpětí hodnot a přítomnost několika extrémních pozorování, což odpovídá značným rozdílům mezi zeměmi z hlediska velikosti ekonomiky, populace i emisí CO₂.
+
+```{r tbl-income-classification}
+#| echo: false
+#| tbl-cap: "Rozdělení zemí podle příjmové skupiny Světové banky."
+datasummary_skim(
+  gdp_pc_ref |> 
+    select(income_group) |>
+    mutate(across(c(income_group), ~ remove_accents(.x))),
+  escape = FALSE
+  )
+```
+
+**Příjmová skupina** byla odvozena z průměrného HDP na obyvatele za roky 2010–2019 (konstantní USD 2011, PPP). Použité hranice – 12 000, 4 000 a 1 000 USD – jsou vlastní kategorizací a nepřebírají přímo metodiku Světové banky, která pracuje s HNP na obyvatele v běžných USD. V analyzovaném souboru převažují země s vysokými příjmy (50 %) a vyššími středními příjmy (24 %). Země s nižšími středními příjmy tvoří přibližně pětinu souboru, zatímco nízkopříjmové země jsou zastoupeny pouze okrajově (4 %).
+
+### OWID - Energy Data
+
+Kompiluje Our World in Data z BP Statistical Review of World Energy a dalších zdrojů. Obsahuje produkci a spotřebu podle komodit v TWh. Země následně byly klasifikovány jako **čistí exportéři fosilních paliv** na základě průměrného salda produkce a spotřeby v letech 2010–2019 zvlášť pro ropu, zemní plyn a uhlí (v TWh). Země je označena jako exportér, pokud produkce přesáhla spotřebu alespoň u jedné z těchto komodit. Průměrování zakrývá strukturální zlomy – země, která přešla z exportéra na importéra (nebo naopak) uprostřed dekády, dostane průměrné saldo blízké nule a může být chybně zařazena. Například GBR bylo čistým exportérem do \~2005, od té doby je čistým importérem.
+
+```{r tbl-souhrne-energy-statistiky}
+#| echo: false
+#| tbl-cap: "Souhrnné statistiky čistého exportu ropy, zemního plynu a uhlí."
+
+datasummary_skim(
+  exporteri_owid, type = "numeric", escape = FALSE
+  )
+```
+
+Zprůměrované proměnné čistého exportu ropy, zemního plynu a uhlí obsahují přibližně jen 0,9 % chybějících hodnot. U dostupných pozorování je patrná **vysoká variabilita a výrazná asymetrie** rozdělení, což odráží existenci několika málo významných exportérů vedle převahy zemí s nízkým nebo záporným čistým exportem.
+
+```{r tbl-fossil-classification}
+#| echo: false
+#| tbl-cap: "Zastoupení zemí podle role v mezinárodním obchodu s fosilními palivy."
+datasummary_skim(
+  exporteri_owid |> 
+    select(vyvoz_ropa, vyvoz_plyn, vyvoz_uhli, fossil_role) |>
+    mutate(across(c(fossil_role), ~ remove_accents(.x))),
+  escape = FALSE
+  )
+```
+
+Výsledný dataset obsahuje 220 zemí. Většina zemí je čistými dovozci nebo energeticky neutrálními státy. **Čistý export ropy** byl identifikován u 26 %, **zemního plynu** u 23 % a **uhlí** u 17 % zemí. Celkem bylo jako **exportéři alespoň jednoho** fosilního paliva klasifikováno 40 % zemí. 11 zemí (6,7 %) slouží jako čistí **vývozci všech uvažovaných složek** fosilních paliv, jendá se o Albánii, Kanadu, Kolumbii, Gruzii, Kazachstán, Kyrgyzstán, Myanmar, Nigérii, Rusko, Srbsko a Tádžikistán.
+
+**Chybějící údaje** se týkají pouze 4 zemí (1,8 %; Antarktida, Curaçao, Federativní státy Mikronésie a Tuvalu), tedy převážně malých nebo specifických územních jednotek s omezenou dostupností dat o produkci a spotřebě fosilních paliv. Tento nedostatek by neměl mít na výsledky analýzy významný vliv, protože po vyřazení zemí s chybějícími údaji o HDP a populaci obsahuje hlavní analytický dataset pouze 164 zemí a žádná z uvedených čtyř jednotek v něm již není zastoupena.
+
+### World Bank WDI
+
+Světová banka shromažďuje data od národních statistických úřadů a ministerstev školství. Indikátor `SE.TER.ENRR` = hrubá míra zápisu do terciárního vzdělávání (% relevantní věkové skupiny).
+
+```{r tbl-education-classification}
+#| echo: false
+#| tbl-cap: "Souhrnné statistiky podílu obyvatel s terciárním vzděláním."
+datasummary_skim(
+  klasifikace_kultura |> 
+    mutate(across(c(nabozenstvi), ~ remove_accents(.x)),
+           across(c(jazyk_skupina), ~ remove_accents(.x))),
+  type = "numeric", escape = FALSE
+  )
+```
+
+Proměnná **podílu obyvatel s terciárním vzděláním** vykazuje poměrně široké rozpětí hodnot (1–122 %), což naznačuje značné rozdíly mezi zeměmi. Chybějících hodnot je málo (9 pozorování) a medián (40 %) je velmi blízký průměru (41 %), takže rozdělení není výrazně asymetrické. Hodnoty převyšující 100 % pravděpodobně souvisejí s odlišnou metodikou ukazatele nebo s mezinárodní mobilitou studentů.
+
+### Jazyková rodina
+
+Manuální lookup sestavený z Ethnologue a CIA World Factbook; přiřazuje každé zemi hlavní úřední jazyk a jeho jazykovou rodinu. Nejvíce jsou zastoupeny **země subsaharské Afriky** (21 %), **románské jazykové skupiny** (17 %) a **arabské jazykové skupiny** (12 %). Významné zastoupení mají také **slovanské** (8 %) a germánské jazyky (11 %). Ostatní jazykové skupiny jsou zastoupeny pouze jednotlivými zeměmi nebo malými skupinami států. Chybějící klasifikace se vyskytuje pouze u 2 zemí (1 %), což svědčí o velmi dobrém pokrytí dat.
+
+### Náboženský okruh
+
+Manuální lookup na základě Pew-Research Center Global Religious Futures; přiřazuje majoritní náboženství nebo sekularismus. V analyzovaném souboru převažují země s **dominantním křesťanstvím** (52 %), následované státy s převahou **islámu** (26 %). Ostatní náboženské skupiny jsou zastoupeny podstatně méně. Chybějící údaje se týkají pouze 6 zemí (4 %), takže proměnná vykazuje velmi dobrou datovou pokrytost.
+
+# Reprodukce grafů Kaya dekompozice emisí CO₂
+
+## Spojené státy americké
+
+```{r fig-graf-usa}
+#| fig-cap: "Kaya dekompozice emisí CO₂ pro USA, 1990–2024. Pruhy = příspěvky faktorů; tečka = skutečná meziroční změna fosilních emisí."
+#| fig-height: 4.5
+#| warning: false
+plot_kaya(kaya, "United States", interaktivni = TRUE)
+```
+
+Emise CO₂ v USA byly dlouhodobě ovlivňovány růstem populace a ekonomické aktivity, zatímco energetická a uhlíková náročnost působily převážně ve směru jejich snižování. Výrazné **poklesy** jsou patrné během **finanční krize** v letech 2008–2009 a zejména **během pandemie** COVID-19 v roce 2020, po níž následovalo rychlé ekonomické oživení a návrat emisí k předchozím úrovním. Krátkodobý propad lze pozorovat také po teroristických útocích z 11. září 2001, které vedly ke zpomalení ekonomiky.
+
+Dlouhodobý pokles energetické a emisní náročnosti souvisí mimo jiné s offshoringem průmyslu (2000–2008) a postupným přechodem od uhlí k zemnímu plynu, tzv. břidlicová revoluce (přechod odstartoval v roce 2005). Po přijetí **Pařížské klimatické dohody** v roce 2015 začal být patrný pokles emisní náročnosti americké ekonomiky. Po zvolení Donalda Trumpa prezidentem v roce 2016 však tempo tohoto poklesu postupně sláblo a trend se prakticky zastavil obchodní válkou mezi USA a Čínou v roce 2018, která byla spojena se zvýšenou ekonomickou aktivitou v některých odvětvích a oslabením důrazu na klimatickou politiku.
+
+## Vybrané státy
+
+Výběr 14 zemí reprezentuje klíčové dimenze analýzy: největší emitenty (USA, Čína, Indie, Rusko), různé příjmové skupiny, odlišné energetické struktury (uhlí – Polsko, jádro – Francie, obnovitelné – Norsko, ropa – Saúdská Arábie) a kontrastní dekouplingové trajektorie napříč všemi světovými regiony (podrobnějí k dekouplingu viz @sec-decoupling).
+
+```{r vybrane-staty}
+#| code-fold: false
+vybrane <- c(
+  "United States", "China", "Germany", "Japan", "India",
+  "United Kingdom", "France", "Poland",
+  "Brazil", "South Africa", "Indonesia",
+  "Russia", "Saudi Arabia", "Norway"
+)
+```
+
+```{r fig-grafy-staty}
+#| fig-height: 18
+#| fig-cap: "Kaya dekompozice pro vybrané státy, 1990–2024."
+#| warning: false
+
+y_vals <- kaya |>
+  filter(country %in% vybrane, !is.na(d_co2_actual)) |>
+  select(d_pop, d_gdp_pc, d_ei, d_ci, interactions, d_co2_actual) |>
+  unlist() |>
+  range(na.rm = TRUE)
+
+plots      <- map(vybrane, \(s)
+  plot_kaya(kaya, s, interaktivni = FALSE) +
+  coord_cartesian(ylim = y_vals)
+)
+legenda    <- cowplot::get_legend(
+  plots[[1]] + theme(legend.position = "bottom", legend.direction = "horizontal")
+)
+grid_plots <- map(plots, \(p) p + theme(legend.position = "none"))
+
+cowplot::plot_grid(
+  cowplot::plot_grid(plotlist = grid_plots, ncol = 2),
+  legenda, ncol = 1, rel_heights = c(1, 0.05)
+)
+```
+
+Vývoj emisí ve sledovaných zemích odráží především rozdílné fáze ekonomického rozvoje. **Nejvýraznější růst emisí** zaznamenaly rozvíjející se ekonomiky, **zejména Čína a Indie**, kde industrializace, urbanizace a růst životní úrovně převážily nad zlepšováním energetické účinnosti. V případě Číny byl růst dále podpořen vstupem do WTO v roce 2001 a masivním přesunem výroby ze západních zemí v období vrcholící globalizace a offshoringu.
+
+Naopak **ve většině vyspělých ekonomik**, jako jsou Spojené království, Německo, Francie a USA, je patrný **dlouhodobý pokles** emisní a energetické náročnosti. Ten souvisí s technologickým pokrokem, modernizací průmyslu, rozvojem nízkoemisních zdrojů a částečně také přesunem energeticky náročné výroby do zahraničí. Významným příkladem jsou USA, kde po roce 2008 přispěla ke snižování emisí také **břidlicová revoluce** a přechod od uhlí k zemnímu plynu. Německo navíc po roce 2011 urychlilo energetickou transformaci v rámci politiky **Energiewende**, zatímco Spojené království dosáhlo výrazného poklesu emisí díky **rychlému útlumu uhlí**.
+
+U některých zemí je vývoj emisí výrazně ovlivněn **strukturou energetiky**. Francie, Norsko a Brazílie těží z vysokého podílu nízkoemisních zdrojů energie (**jaderné**, **vodní** či **biopaliv**), zatímco v Jihoafrické republice zůstává dekarbonizace brzděna vysokou z**ávislostí na uhlí**.
+
+Ve většině zemí jsou zároveň dobře patrné dopady **významných globálních událostí**. **Finanční krize** v letech 2008–2009 vedla k dočasnému poklesu emisí v důsledku propadu průmyslové výroby a hospodářské aktivity. Ještě výraznější byl **pandemický rok** 2020, kdy omezení dopravy a ekonomické činnosti způsobilo historicky mimořádné poklesy emisí napříč všech států.
+
+Některé země vykazují specifický vývoj spojený s geopolitickými nebo energetickými událostmi. Japonsko po **havárii elektrárny Fukušima** v roce 2011 dočasně zvýšilo využívání fosilních paliv, zatímco Rusko vedle transformačního propadu po **rozpadu Sovětského svazu** ovlivnily také **sankce po anexi Krymu** v roce 2014 a po invazi na Ukrajinu v roce 2022. V Polsku se po **vstupu do EU** v roce 2004 postupně snižovala energetická náročnost ekonomiky, avšak vysoká závislost na uhlí nadále omezuje tempo dekarbonizace.
+
+Naopak u **významných exportérů energií**, jako jsou Saúdská Arábie a Norsko, jsou změny emisí více **navázány na vývoj světových energetických trhů** a cen fosilních paliv než na domácí hospodářský cyklus.
+
+## Podle příjmové skupiny
+
+```{r fig-souhrnne-trendy}
+#| fig-cap: "Průměrné příspěvky Kaya faktorů podle příjmové skupiny zemí, 1990–2024. Tečka = průměrná skutečná změna CO₂."
+#| echo: false
+
+kaya |>
+  filter(!is.na(income_group)) |>
+  group_by(income_group, year) |>
+  summarise(across(c(d_pop, d_gdp_pc, d_ei, d_ci, d_co2_actual),
+                   \(x) mean(x, na.rm = TRUE)), .groups = "drop") |>
+  pivot_longer(c(d_pop, d_gdp_pc, d_ei, d_ci),
+               names_to = "faktor", values_to = "hodnota") |>
+  mutate(faktor = preloz_faktory(faktor),
+         faktor = factor(faktor, levels = names(barvy_kaya)[1:4])) |>
+  ggplot(aes(x = year, y = hodnota, fill = faktor)) +
+  geom_col(position = "stack", width = 0.7) +
+  geom_line(aes(y = d_co2_actual), color = "#222222") +
+  geom_point(aes(y = d_co2_actual, color = "Fosilní CO₂"), size = 1.8) +
+  geom_hline(yintercept = 0, linewidth = 0.3, color = "gray40") +
+  facet_wrap(~income_group, ncol = 2) +
+  scale_fill_manual(values = barvy_kaya[1:4], name = NULL) +
+  scale_color_manual(values = c("Fosilní CO₂" = "#222222"), name = NULL) +
+  guides(fill  = guide_legend(order = 1, override.aes = list(shape = NA)),
+         color = guide_legend(order = 2, override.aes = list(size = 2, linetype = 0, fill = NA))) +
+  scale_x_continuous(breaks = seq(1990, 2024, by = 10)) +
+  scale_y_continuous(labels = scales::label_percent(scale = 1)) +
+  labs(x = NULL, y = "Přírůstek/rok") +
+  theme(legend.position = "bottom", legend.key.size = unit(0.4, "cm"),
+        strip.text = element_text(face = "bold"))
+```
+
+Graf ukazuje výrazné rozdíly v dynamice emisí mezi příjmovými skupinami zemí. Zatímco ve **vysokopříjmových zemích** jsou změny emisí relativně malé a **dlouhodobě tlumené** **poklesem energetické a uhlíkové náročnosti**, v zemích s nižšími příjmy jsou meziroční výkyvy podstatně vyšší. Růst emisí je zde tažen především **populačním růstem a růstem HDP** na obyvatele.
+
+**Nejstabilnější vývoj** vykazují **vysokopříjmové země**, zatímco **nízkopříjmové země** se vyznačují **největší volatilitou** a nejvyššími meziročními přírůstky i poklesy emisí. Vyšší středně příjmové země představují přechodnou skupinu, ve které se kombinuje rychlý ekonomický růst s postupným zlepšováním energetické efektivity.
+
+## Exportéři vs. importéři fosilních paliv
+
+Exportéři fosilních paliv jsou státy, které jsou čistými vývozci ropy, zemního plynu nebo uhlí. Patří mezi ně např. Saúdská Arábie, Rusko, Norsko, Austrálie, Kanada nebo Nigérie. Ostatní státy jsou klasifikovány jako importéři / neutrální.
+
+```{r fig-exporteri-importeri}
+#| fig-cap: "Průměrné příspěvky Kaya faktorů: exportéři vs. importéři fosilních paliv, 1990–2024."
+#| echo: false
+
+kaya |>
+  filter(!is.na(fossil_role)) |>
+  group_by(fossil_role, year) |>
+  summarise(across(c(d_pop, d_gdp_pc, d_ei, d_ci, d_co2_actual),
+                   \(x) mean(x, na.rm = TRUE)), .groups = "drop") |>
+  pivot_longer(c(d_pop, d_gdp_pc, d_ei, d_ci),
+               names_to = "faktor", values_to = "hodnota") |>
+  mutate(faktor = preloz_faktory(faktor),
+         faktor = factor(faktor, levels = names(barvy_kaya)[1:4])) |>
+  ggplot(aes(x = year, y = hodnota, fill = faktor)) +
+  geom_col(position = "stack", width = 0.7) +
+  geom_line(aes(y = d_co2_actual), color = "#222222") +
+  geom_point(aes(y = d_co2_actual, color = "Fosilní CO₂"), size = 1.8) +
+  geom_hline(yintercept = 0, linewidth = 0.3, color = "gray40") +
+  facet_wrap(~fossil_role) +
+  scale_fill_manual(values = barvy_kaya[1:4], name = NULL) +
+  scale_color_manual(values = c("Fosilní CO₂" = "#222222"), name = NULL) +
+  guides(fill  = guide_legend(order = 1, override.aes = list(shape = NA)),
+         color = guide_legend(order = 2, override.aes = list(size = 2, linetype = 0, fill = NA))) +
+  scale_x_continuous(breaks = seq(1990, 2024, by = 10)) +
+  scale_y_continuous(labels = scales::label_percent(scale = 1)) +
+  labs(x = NULL, y = "Přírůstek/rok") +
+  theme(legend.position = "bottom", legend.key.size = unit(0.4, "cm"),
+        strip.text = element_text(face = "bold"))
+```
+
+Rozdíly mezi exportéry fosilních paliv a dovozci či neutrálními zeměmi nejsou výrazné, přesto lze pozorovat několik odlišností. U **exportérů** je růst emisí častěji **spojen s růstem HDP na obyvatele** a celkově vykazuje vyšší volatilitu. Naopak u **dovozců a neutrálních zemí** hraje významnější roli snižování energetické a uhlíkové náročnosti, které dlouhodobě tlumí růst emisí. Obě skupiny vykazují výrazný propad kolem roku 2020 v důsledku pandemie COVID-19, po němž následovalo rychlé oživení.
+
+Celkově se však ukazuje, že postavení země v mezinárodním obchodu s fosilními palivy má na dynamiku emisí menší vliv než úroveň ekonomického rozvoje.
+
+# Emise CO₂ na obyvatele
+
+Absolutní emise zakrývají demografické rozdíly – velké země emitují více jednoduše proto, že mají více lidí. Emise na obyvatele ukazují, jak "uhlíkově náročný" je průměrný životní standard v dané příjmové skupině.
+
+```{r fig-mapa-emise}
+#| message: false 
+#| warning: false 
+#| echo: false 
+#| fig-cap: "Průměrné emise CO₂ na obyvatele ve vybraných zemích světa za období 1990–2023 ."  
+library(leaflet) 
+library(sf) 
+
+# Geometrie světa (Natural Earth přes GitHub, ISO_A3 kód) 
+world_sf <- sf::st_read(   "https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson",   quiet = TRUE ) |>   
+  select(iso_code = ISO3166.1.Alpha.3, geometry)  
+
+co2_pc_map <- owid |>   
+  filter(!is.na(co2), !is.na(population)) |>  
+  mutate(co2_pc = (co2 * 1e6) / population) |>   
+  group_by(iso_code, country) |>   
+  summarise(co2_pc = mean(co2_pc, na.rm = TRUE), .groups = "drop")  
+
+map_data <- world_sf |>   
+  left_join(co2_pc_map, by = "iso_code")  
+
+# Barevná škála (pevný rozsah pro srovnatelnost) 
+pal_co2pc <- colorNumeric(  
+  palette  = c("#fae7e7", "#D51317"),   
+  domain   = c(0, 25),   
+  na.color = "#cccccc")  
+
+breaks_co2pc <- c(0, 5, 10, 15, 20, 25)  
+
+leaflet(map_data) |>   
+  addPolygons(     
+    fillColor   = ~pal_co2pc(co2_pc),     
+    fillOpacity = 0.8,     
+    color       = "#ffffff",     
+    weight      = 0.5,     
+    label       = ~paste0(country, ": ",                        
+                          scales::number(co2_pc, accuracy = 0.1,                                          decimal.mark = ","), " t CO₂/ob."),     
+    labelOptions = labelOptions(permanent = FALSE, direction = "auto"),
+    highlightOptions = highlightOptions(weight = 2, color = "#666",
+                                        bringToFront = TRUE)   
+    ) |>  
+  addLegend(     
+    colors   = pal_co2pc(breaks_co2pc),     
+    labels   = paste0(breaks_co2pc, " t"),     
+    title    = "CO₂/obyvatele",    
+    position = "bottomright"   
+  ) |>   
+  setView(lng = 10, lat = 20, zoom = 2)
+```
+
+**Nejvyšší** emise CO₂ na obyvatele vykazují především **státy Perského zálivu**, zejména Katar (49,6 t CO₂/obyv.), Kuvajt (36,6 t) a Spojené arabské emiráty (25,6 t). V první desítce se vedle významných producentů ropy a zemního plynu objevují také **malé ostrovní ekonomiky** (Curaçao, Trinidad a Tobago) a **vyspělé země s vysokou spotřebou energie**, například Lucembursko či Spojené státy. Česká republika s hodnotou 11,6 t CO₂ na obyvatele patří rovněž mezi země s nadprůměrnými emisemi na obyvatele. Celkově je patrné, že vysoké emise na obyvatele jsou často spojeny s těžbou fosilních paliv, energeticky náročnou ekonomikou nebo vysokou životní úrovní.
+
+```{r fig-co2-pc}
+#| fig-cap: "Medián emisí CO₂ na obyvatele (t CO₂/os.) podle příjmové skupiny zemí, 1990–2024."
+#| warning: false
+
+co2_pc_data <- kaya |>
+  filter(!is.na(income_group), !is.na(co2), !is.na(population)) |>
+  mutate(co2_pc = co2 * 1e6 / population) |>
+  group_by(income_group, year) |>
+  summarise(co2_pc_med = median(co2_pc, na.rm = TRUE), .groups = "drop") |>
+  mutate(text = paste0(
+    "Příjmová skupina: ", income_group, "<br>",
+    "CO₂/obyvatele: ", round(co2_pc_med, 2), " t<br>",
+    "Rok: ", year
+  ))
+
+p_co2_pc <- co2_pc_data |>
+  ggplot(aes(x = year, y = co2_pc_med, color = income_group, 
+             group = income_group, text = text)) +
+  geom_line(linewidth = 0.9) +
+  scale_x_continuous(breaks = seq(1990, 2024, by = 5)) +
+  scale_color_manual(values = c(
+    "Vysoký příjem"         = "#D51317",
+    "Vyšší střední příjem"  = "#F39200",
+    "Nižší střední příjem"  = "#0094CD",
+    "Nízký příjem"          = "#95C11F"
+  )) +
+  labs(x = NULL, y = "t CO₂ / obyvatele (medián)", color = NULL) +
+  theme(legend.position = "bottom")
+
+ggplotly(p_co2_pc, tooltip = "text") |>
+  config(displayModeBar = FALSE)
+```
+
+Graf zachycuje **dlouhodobý pokles** emisí CO₂ na obyvatele **ve vysokopříjmových zemích**, kde medián klesl z přibližně 7 na 5,3 t CO₂ na obyvatele. Naopak **ve vyšších středně příjmových zemích** emise na obyvatele téměř **zdvojnásobily svou úroveň**, což souvisí s rychlou industrializací a ekonomickým růstem. U nižších středně příjmových a nízkopříjmových zemí zůstávají emise výrazně nižší, přesto i zde lze pozorovat pozvolný růst.
+
+# Korelace faktorů Kaya dekompozice
+
+Korelogram ukazuje vzájemné vztahy mezi Kaya faktory a skutečnou změnou CO₂ pro vybraný rok. Pro robustnější obraz je zvolen rok **2019** (před covidovým výkyvem), ale kód lze snadno upravit.
+
+```{r fig-korelogram}
+#| fig-cap: "Korelogram Kaya faktorů a změny CO₂ (2019, průřez všemi státy). Pearsonovy korelace na 5% hladině významnosti; pouze státy s úplnými daty."
+
+rok_korelace <- 2019
+
+cor_data <- kaya |>
+  filter(year == rok_korelace) |>
+  select(
+    `Δ Populace`      = d_pop,
+    `Δ HDP/obyv.`     = d_gdp_pc,
+    `Δ Energie/HDP`   = d_ei,
+    `Δ CO₂/Energie`   = d_ci,
+    `Δ CO₂ (skuteč.)` = d_co2_actual,
+    `Δ CO₂ (součet)`  = d_co2_sum
+  ) |>
+  drop_na()
+
+cor_matrix <- cor(cor_data, method = "pearson")
+p_matrix   <- cor.mtest(cor_data, conf.level = 0.95)$p
+
+corrplot(cor_matrix,
+         p.mat    = p_matrix,
+         sig.level = 0.05,
+         insig    = "blank",
+         method   = "circle",
+         type     = "upper",
+         addCoef.col = "black",
+         number.cex  = 0.75,
+         tl.col   = "black",
+         tl.srt   = 40,
+         col      = colorRampPalette(c("#D51317", "white", "#007B3DFF"))(200),
+         diag     = FALSE)
+```
+
+Korelační analýza potvrzuje, že meziroční změny emisí CO₂ jsou nejsilněji spojeny se změnami **energetické náročnosti ekonomiky a uhlíkové náročnosti energie**. Naopak vliv **populačního růstu** je relativně **slabý**. Mezi růstem HDP na obyvatele a energetickou náročností je patrný mírný negativní vztah, což naznačuje, že ekonomický růst bývá často doprovázen efektivnějším využíváním energie. Skutečná změna emisí CO₂ téměř dokonale odpovídá hodnotě vypočtené pomocí identity Kaya, což potvrzuje správnost provedené dekompozice.
+
+# Decoupling: odpojení ekonomiky od emisí {#sec-decoupling}
+
+**Decoupling** (česky oddělení nebo rozpojení) označuje situaci, kdy se ekonomický růst přestává pojit s růstem environmentální zátěže, nejčastěji emisí CO₂.Jinými slovy země bohatne, ale emise nerostou stejným tempem – nebo dokonce klesají. Pokud CO₂ klesá při rostoucím HDP, jde o absolutní decoupling.
+
+```{r fig-decoupling}
+#| fig-cap: "Kumulativní index HDP a CO₂ (startovní pozice v 1990)."
+
+kaya |>
+  filter(country %in% vybrane, !is.na(gdp), !is.na(co2)) |>
+  group_by(country) |>
+  mutate(
+    gdp_idx = gdp / first(gdp[year == min(year[!is.na(gdp)])]) * 100,
+    co2_idx = co2 / first(co2[year == min(year[!is.na(co2)])]) * 100
+  ) |>
+  select(country, year, gdp_idx, co2_idx) |>
+  pivot_longer(c(gdp_idx, co2_idx), names_to = "ukazatel", values_to = "hodnota") |>
+  mutate(ukazatel = recode(ukazatel, "gdp_idx" = "HDP", "co2_idx" = "CO₂")) |>
+  ggplot(aes(x = year, y = hodnota, color = ukazatel, group = ukazatel)) +
+  geom_line(linewidth = 0.8) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "gray60") +
+  facet_wrap(~country, ncol = 4) +
+  scale_color_manual(values = c("HDP" = "#007B3DFF", "CO₂" = "#D51317")) +
+  scale_x_continuous(breaks = c(1990, 2010)) +
+  labs(x = NULL, y = "Index (1990 = 100)", color = NULL) +
+  theme(legend.position = "bottom",
+        strip.text = element_text(face = "bold", size = 8))
+```
+
+## Klasifikace decouplingového statusu
+
+Scatter plot zobrazuje kumulativní změnu HDP a CO₂ za období 2000–2023 pro každý stát. Poloha bodu v grafu jednoznačně určuje typ decouplings:
+
+-   **Absolutní decoupling** (zelená, pravý dolní kvadrant): HDP roste, CO₂ klesá
+-   **Relativní decoupling** (žlutozelená, pravý horní kvadrant pod diagonálou): HDP roste rychleji než CO₂
+-   **Recoupling** (červená): CO₂ roste stejně rychle nebo rychleji než HDP
+-   **Pokles obojího** (šedá, levý dolní kvadrant): ekonomická kontrakce a pokles emisí zároveň
+
+```{r fig-decoupling-scatter}
+#| fig-cap: "Kumulativní změna HDP vs. CO₂ za období 2000–2023. Popisky: vybrané státy + Česká republika."
+#| message: false
+#| warning: false
+
+year_end_gdp <- kaya |> filter(!is.na(gdp), !is.na(co2)) |> pull(year) |> max()
+
+start_df <- kaya |>
+  filter(year == 2000, !is.na(gdp), !is.na(co2)) |>
+  select(iso_code, country, income_group, gdp_start = gdp, co2_start = co2)
+
+end_df <- kaya |>
+  filter(year == year_end_gdp, !is.na(gdp), !is.na(co2)) |>
+  select(iso_code, gdp_end = gdp, co2_end = co2)
+
+decoupling_df <- start_df |>
+  inner_join(end_df, by = "iso_code") |>
+  mutate(
+    gdp_change = (gdp_end / gdp_start - 1) * 100,
+    co2_change = (co2_end / co2_start - 1) * 100,
+    status = case_when(
+      gdp_change > 0 & co2_change < 0                            ~ "Absolutní decoupling",
+      gdp_change > 0 & co2_change >= 0 & co2_change < gdp_change ~ "Relativní decoupling",
+      gdp_change > 0 & co2_change >= gdp_change                  ~ "Recoupling",
+      TRUE                                                        ~ "Pokles obojího"
+    ),
+    popisek = if_else(country %in% c(vybrane, "Czechia"), country, NA_character_),
+    text = country
+  )
+
+barvy_status <- c(
+  "Absolutní decoupling" = "#007B3DFF",
+  "Relativní decoupling" = "#95C11F",
+  "Recoupling"           = "#D51317",
+  "Pokles obojího"       = "gray60"
+)
+
+p_scatter <- ggplot(decoupling_df,
+       aes(x = gdp_change, y = co2_change, color = status)) +
+  geom_hline(yintercept = 0, color = "gray50", linetype = "dashed") +
+  geom_vline(xintercept = 0, color = "gray50", linetype = "dashed") +
+  geom_abline(slope = 1, intercept = 0, color = "gray70", linetype = "dotted") +
+  geom_point(aes(text = text), alpha = 0.75, size = 2) +
+  scale_color_manual(values = barvy_status) +
+  labs(x = paste0("Kumulativní změna HDP 2000–", year_end_gdp, " (%)"),
+       y = paste0("Kumulativní změna CO₂ 2000–", year_end_gdp, " (%)"),
+       color = NULL) +
+  theme(legend.position = "bottom")
+
+labeled_pts <- decoupling_df |>
+  filter(!is.na(popisek)) |>
+  mutate(barva = barvy_status[status])
+
+# Force-directed repulsion v datových souřadnicích
+x_rng <- range(decoupling_df$gdp_change, na.rm = TRUE)
+y_rng <- range(decoupling_df$co2_change, na.rm = TRUE)
+chr_w <- diff(x_rng) * 6.5 / 650   # šířka jednoho znaku v datových jednotkách
+lbl_h <- diff(y_rng) * 16 / 430    # výška labelu v datových jednotkách
+
+lx <- labeled_pts$gdp_change
+ly <- labeled_pts$co2_change
+n  <- nrow(labeled_pts)
+
+for (iter in seq_len(500)) {
+  for (i in seq_len(n - 1)) {
+    for (j in seq(i + 1, n)) {
+      dx      <- lx[i] - lx[j]
+      dy      <- ly[i] - ly[j]
+      min_x   <- (nchar(labeled_pts$popisek[i]) + nchar(labeled_pts$popisek[j])) * chr_w / 2 + chr_w
+      min_y   <- lbl_h * 1.4
+      ovlp_x  <- min_x - abs(dx)
+      ovlp_y  <- min_y - abs(dy)
+      if (ovlp_x > 0 && ovlp_y > 0) {
+        sgn_x <- if (dx == 0) 1 else sign(dx)
+        sgn_y <- if (dy == 0) 1 else sign(dy)
+        if (ovlp_x < ovlp_y) {
+          lx[i] <- lx[i] + sgn_x * ovlp_x / 2
+          lx[j] <- lx[j] - sgn_x * ovlp_x / 2
+        } else {
+          ly[i] <- ly[i] + sgn_y * ovlp_y / 2
+          ly[j] <- ly[j] - sgn_y * ovlp_y / 2
+        }
+      }
+    }
+  }
+}
+
+annotations <- lapply(seq_len(n), function(i) {
+  list(
+    x           = lx[i],
+    y           = ly[i],
+    text        = labeled_pts$popisek[i],
+    showarrow   = FALSE,
+    xanchor     = "center",
+    yanchor     = "middle",
+    font        = list(size = 10, color = labeled_pts$barva[i]),
+    bgcolor     = "rgba(255,255,255,0.85)",
+    bordercolor = labeled_pts$barva[i],
+    borderwidth = 0.8,
+    borderpad   = 2
+  )
+})
+
+ggplotly(p_scatter, tooltip = "text") |>
+  layout(annotations = annotations) |>
+  config(displayModeBar = TRUE, displaylogo = FALSE,
+         modeBarButtonsToRemove = c("toImage", "pan2d", "select2d", "lasso2d",
+                                    "hoverClosestCartesian", "hoverCompareCartesian",
+                                    "toggleSpikelines"))
+```
+
+Oba grafy ukazují, že **absolutní decoupling** je typický především pro **vyspělé ekonomiky**, jako jsou Francie, Německo, Japonsko, Norsko, Polsko, Spojené království, Česko a Spojené státy, kde HDP dlouhodobě roste při současné stagnaci nebo poklesu emisí CO₂. Naproti tomu **Čína, Indie, Indonésie a Saúdská Arábie** vykazují převážně **relativní decoupling** – emise zde nadále rostou, avšak pomaleji než ekonomika.
+
+Výsledky tak naznačují, že rozvinuté země jsou v procesu oddělování ekonomického růstu od emisí obecně dále než většina **rozvíjejících se ekonomik**, které stále **procházejí emisně náročnější fází** hospodářského rozvoje.
+
+<!-- # COVID-19: propad a návrat emisí -->
+
+<!-- Pandemie COVID-19 způsobila v roce 2020 největší jednorázový pokles emisí v historii moderní průmyslové ekonomiky. Klíčová otázka je, zda šlo o strukturální zlom nebo pouhou dočasnou korekci – a zda se různé skupiny zemí chovaly odlišně. -->
+
+<!-- ```{r fig-covid-bounce} -->
+
+<!-- #| fig-cap: "Meziroční změna emisí CO₂ v letech 2020–2022 podle příjmové skupiny (medián). Záporné hodnoty = pokles; kladné = návrat." -->
+
+<!-- #| fig-height: 4 -->
+
+<!-- kaya |> -->
+
+<!--   filter(year %in% 2020:2022, !is.na(income_group), !is.na(d_co2_actual)) |> -->
+
+<!--   group_by(income_group, year) |> -->
+
+<!--   summarise( -->
+
+<!--     medián   = median(d_co2_actual, na.rm = TRUE), -->
+
+<!--     q25      = quantile(d_co2_actual, 0.25, na.rm = TRUE), -->
+
+<!--     q75      = quantile(d_co2_actual, 0.75, na.rm = TRUE), -->
+
+<!--     .groups  = "drop" -->
+
+<!--   ) |> -->
+
+<!--   mutate(year = factor(year)) |> -->
+
+<!--   ggplot(aes(x = year, y = medián, fill = income_group)) + -->
+
+<!--   geom_col(position = "dodge", width = 0.7) + -->
+
+<!--   geom_errorbar(aes(ymin = q25, ymax = q75), -->
+
+<!--                 position = position_dodge(0.7), width = 0.25, color = "gray30") + -->
+
+<!--   geom_hline(yintercept = 0, linewidth = 0.4) + -->
+
+<!--   scale_fill_manual(values = c( -->
+
+<!--     "Vysoký příjem"         = "#D51317", -->
+
+<!--     "Vyšší střední příjem"  = "#F39200", -->
+
+<!--     "Nižší střední příjem"  = "#0094CD", -->
+
+<!--     "Nízký příjem"          = "#95C11F" -->
+
+<!--   )) + -->
+
+<!--   labs(x = NULL, y = "Medián Δ CO₂ (% /rok)", fill = NULL, -->
+
+<!--        caption = "Chybové úsečky = mezikvartilové rozpětí.") + -->
+
+<!--   theme(legend.position = "bottom") -->
+
+<!-- ``` -->
+
+```{r cluster-prep-early}
+#| include: false
+cluster_data <- kaya |>
+  filter(!is.na(d_pop), !is.na(d_gdp_pc), !is.na(d_ei), !is.na(d_ci)) |>
+  group_by(iso_code, country) |>
+  summarise(
+    pop_mean = mean(d_pop,         na.rm = TRUE),
+    gdp_mean = mean(d_gdp_pc,      na.rm = TRUE),
+    ei_mean  = mean(d_ei,          na.rm = TRUE),
+    ci_mean  = mean(d_ci,          na.rm = TRUE),
+    co2_mean = mean(d_co2_actual,  na.rm = TRUE),
+    n_years  = sum(!is.na(d_co2_actual)),
+    pop_ref  = mean(population[year %in% 2015:2019], na.rm = TRUE),
+    .groups  = "drop"
+  ) |>
+  filter(n_years >= 20) |>
+  left_join(klasifikace |> select(iso_code, income_group, fossil_role, gdp_pc_mean),
+            by = "iso_code") |>
+  left_join(klasifikace_kultura |> select(iso_code, jazyk_skupina, nabozenstvi,
+                                          tertiarni_vzdelanost),
+            by = "iso_code")
+```
+
+# Kulturní dimenze: Vzdělání a emise CO₂
+
+Kaya identita zachycuje přímé ekonomické a technologické faktory emisí, ale nesděluje nic o tom, *proč* se státy nacházejí na různých trajektoriích. Vzdělání, jazykový okruh a převažující náboženství slouží jako proxy pro hlubší institucionální, kulturní a historické kontexty – a mohou pomoci interpretovat clustering.
+
+```{r fig-vzdelanost-co2}
+#| fig-cap: "Terciární vzdělání vs. průměrná roční změna CO₂ (1990–2024). Vyšší vzdělanost je obecně spojena s rychlejší dekarbonizací."
+
+barvy_income <- c(
+  "Vysoký příjem"         = "#D51317",
+  "Vyšší střední příjem"  = "#F39200",
+  "Nižší střední příjem"  = "#0094CD",
+  "Nízký příjem"          = "#95C11F"
+)
+
+vzd_data <- cluster_data |>
+  filter(!is.na(tertiarni_vzdelanost), !is.na(co2_mean), !is.na(income_group)) |>
+  mutate(
+    popisek = if_else(country %in% c(vybrane, "Czechia"), country, NA_character_),
+    text    = country
+  )
+
+# Ruční výpočet LM + 95% IS (geom_smooth ribbon ggplotly nepřevádí spolehlivě)
+lm_vzd  <- lm(co2_mean ~ tertiarni_vzdelanost, data = vzd_data)
+lm_seq  <- seq(min(vzd_data$tertiarni_vzdelanost, na.rm = TRUE),
+               max(vzd_data$tertiarni_vzdelanost, na.rm = TRUE),
+               length.out = 200)
+lm_pred <- predict(lm_vzd,
+                   newdata = data.frame(tertiarni_vzdelanost = lm_seq),
+                   interval = "confidence") |>
+  as.data.frame() |>
+  mutate(tertiarni_vzdelanost = lm_seq)
+
+p_vzd <- ggplot(vzd_data,
+                aes(x = tertiarni_vzdelanost, y = co2_mean, color = income_group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  geom_ribbon(data = lm_pred,
+              aes(x = tertiarni_vzdelanost, ymin = lwr, ymax = upr),
+              inherit.aes = FALSE, fill = "gray30") +
+  geom_line(data = lm_pred,
+            aes(x = tertiarni_vzdelanost, y = fit),
+            inherit.aes = FALSE, color = "gray30", linewidth = 0.6, linetype = "dashed") +
+  geom_point(aes(text = text, group = income_group), size = 2) +
+  scale_color_manual(values = barvy_income) +
+  labs(x = "Hrubá míra terciárního vzdělání, průměr 2010–2019 (%)",
+       y = "Průměrná roční změna CO₂ (% /rok, 1990–2024)",
+       color = NULL) +
+  theme(legend.position = "bottom")
+
+# Force-directed repulsion anotací
+vzd_labeled <- vzd_data |>
+  filter(!is.na(popisek)) |>
+  mutate(barva = barvy_income[income_group])
+
+x_rng2 <- range(vzd_data$tertiarni_vzdelanost, na.rm = TRUE)
+y_rng2 <- range(vzd_data$co2_mean, na.rm = TRUE)
+chr_w2 <- diff(x_rng2) * 6.5 / 650
+lbl_h2 <- diff(y_rng2) * 16 / 430
+
+lx2 <- vzd_labeled$tertiarni_vzdelanost
+ly2 <- vzd_labeled$co2_mean
+n2  <- nrow(vzd_labeled)
+
+for (iter in seq_len(500)) {
+  for (i in seq_len(n2 - 1)) {
+    for (j in seq(i + 1, n2)) {
+      dx     <- lx2[i] - lx2[j]
+      dy     <- ly2[i] - ly2[j]
+      min_x  <- (nchar(vzd_labeled$popisek[i]) + nchar(vzd_labeled$popisek[j])) * chr_w2 / 2 + chr_w2
+      min_y  <- lbl_h2 * 1.4
+      ovlp_x <- min_x - abs(dx)
+      ovlp_y <- min_y - abs(dy)
+      if (ovlp_x > 0 && ovlp_y > 0) {
+        sgn_x <- if (dx == 0) 1 else sign(dx)
+        sgn_y <- if (dy == 0) 1 else sign(dy)
+        if (ovlp_x < ovlp_y) {
+          lx2[i] <- lx2[i] + sgn_x * ovlp_x / 2
+          lx2[j] <- lx2[j] - sgn_x * ovlp_x / 2
+        } else {
+          ly2[i] <- ly2[i] + sgn_y * ovlp_y / 2
+          ly2[j] <- ly2[j] - sgn_y * ovlp_y / 2
+        }
+      }
+    }
+  }
+}
+
+annotations_vzd <- lapply(seq_len(n2), function(i) {
+  list(
+    x           = lx2[i],
+    y           = ly2[i],
+    text        = vzd_labeled$popisek[i],
+    showarrow   = FALSE,
+    xanchor     = "center",
+    yanchor     = "middle",
+    font        = list(size = 10, color = vzd_labeled$barva[i]),
+    bgcolor     = "rgba(255,255,255,0.85)",
+    bordercolor = vzd_labeled$barva[i],
+    borderwidth = 0.8,
+    borderpad   = 2
+  )
+})
+
+ggplotly(p_vzd, tooltip = "text") |>
+  layout(annotations = annotations_vzd) |>
+  style(opacity = .15, traces = 2) |>
+  config(displayModeBar = FALSE)
+```
+
+Graf naznačuje **záporný vztah mezi úrovní terciárního vzdělání a růstem emisí CO₂**. Země s vyšším podílem obyvatel s terciárním vzděláním dosahují v průměru nižšího růstu emisí, případně jejich poklesu. Naopak nejvyšší přírůstky emisí jsou patrné zejména u zemí s nižší úrovní vzdělání, jako jsou **Indonésie, Indie, Čína nebo Saúdská Arábie**.
+
+Tento vztah je však třeba interpretovat opatrně, protože **úroveň vzdělání úzce souvisí s ekonomickou vyspělostí země**. Vyšší vzdělanost tak pravděpodobně odráží širší charakteristiky rozvinutých ekonomik, jako jsou vyšší příjmy, technologická vyspělost a efektivnější využívání energie.
+
+<!-- ## Průměrná změna CO₂ podle náboženství -->
+
+<!-- ```{r fig-co2-nabozenstvi} -->
+
+<!-- #| fig-cap: "Průměrná roční změna emisí CO₂ podle převažujícího náboženství státu (medián zemí ve skupině, 1990–2024). Chybové úsečky = mezikvartilové rozpětí." -->
+
+<!-- #| fig-height: 4 -->
+
+<!-- cluster_data |> -->
+
+<!--   filter(!is.na(nabozenstvi), !is.na(co2_mean)) |> -->
+
+<!--   group_by(nabozenstvi) |> -->
+
+<!--   summarise( -->
+
+<!--     med  = median(co2_mean, na.rm = TRUE), -->
+
+<!--     q25  = quantile(co2_mean, 0.25, na.rm = TRUE), -->
+
+<!--     q75  = quantile(co2_mean, 0.75, na.rm = TRUE), -->
+
+<!--     n    = n(), -->
+
+<!--     .groups = "drop" -->
+
+<!--   ) |> -->
+
+<!--   mutate(nabozenstvi = forcats::fct_reorder(nabozenstvi, med)) |> -->
+
+<!--   ggplot(aes(x = nabozenstvi, y = med)) + -->
+
+<!--   geom_col(fill = "#7ec8c8", width = 0.6) + -->
+
+<!--   geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.25, color = "gray30") + -->
+
+<!--   geom_hline(yintercept = 0, linewidth = 0.4) + -->
+
+<!--   geom_text(aes(label = paste0("n=", n), y = q75 + 0.15), size = 3, color = "gray40") + -->
+
+<!--   coord_flip() + -->
+
+<!--   labs(x = NULL, y = "Medián průměrné roční změny CO₂ (% /rok)", -->
+
+<!--        caption = "Chybové úsečky = mezikvartilové rozpětí.") + -->
+
+<!--   theme(legend.position = "none") -->
+
+<!-- ``` -->
+
+<!-- ## Průměrná změna CO₂ podle jazykového okruhu -->
+
+<!-- ```{r fig-co2-jazyk} -->
+
+<!-- #| fig-cap: "Průměrná roční změna emisí CO₂ podle jazykového okruhu (medián zemí ve skupině, 1990–2024)." -->
+
+<!-- #| fig-height: 5 -->
+
+<!-- cluster_data |> -->
+
+<!--   filter(!is.na(jazyk_skupina), !is.na(co2_mean)) |> -->
+
+<!--   group_by(jazyk_skupina) |> -->
+
+<!--   summarise( -->
+
+<!--     med  = median(co2_mean, na.rm = TRUE), -->
+
+<!--     q25  = quantile(co2_mean, 0.25, na.rm = TRUE), -->
+
+<!--     q75  = quantile(co2_mean, 0.75, na.rm = TRUE), -->
+
+<!--     n    = n(), -->
+
+<!--     .groups = "drop" -->
+
+<!--   ) |> -->
+
+<!--   mutate(jazyk_skupina = forcats::fct_reorder(jazyk_skupina, med)) |> -->
+
+<!--   ggplot(aes(x = jazyk_skupina, y = med)) + -->
+
+<!--   geom_col(fill = "#c8a8d8", width = 0.6) + -->
+
+<!--   geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.25, color = "gray30") + -->
+
+<!--   geom_hline(yintercept = 0, linewidth = 0.4) + -->
+
+<!--   geom_text(aes(label = paste0("n=", n), y = q75 + 0.15), size = 3, color = "gray40") + -->
+
+<!--   coord_flip() + -->
+
+<!--   labs(x = NULL, y = "Medián průměrné roční změny CO₂ (% /rok)", -->
+
+<!--        caption = "Chybové úsečky = mezikvartilové rozpětí.") + -->
+
+<!--   theme(legend.position = "none") -->
+
+<!-- ``` -->
+
+# Clusterová analýza
+
+Clusterová analýza (k-means, `k = 5`) je počítána na čtyřech proměnných – ročních průměrech Kaya faktorů za celé dostupné období (státy s alespoň 20 lety dat). Vstupní proměnné jsou standardizovány (z-score). Skutečná změna CO₂ v clusteru není – slouží jen jako validační proměnná.
+
+```{r cluster-prep}
+cluster_data <- kaya |>
+  filter(!is.na(d_pop), !is.na(d_gdp_pc), !is.na(d_ei), !is.na(d_ci)) |>
+  group_by(iso_code, country) |>
+  summarise(
+    pop_mean = mean(d_pop,         na.rm = TRUE),
+    gdp_mean = mean(d_gdp_pc,      na.rm = TRUE),
+    ei_mean  = mean(d_ei,          na.rm = TRUE),
+    ci_mean  = mean(d_ci,          na.rm = TRUE),
+    co2_mean = mean(d_co2_actual,  na.rm = TRUE),
+    n_years  = sum(!is.na(d_co2_actual)),
+    pop_ref  = mean(population[year %in% 2015:2019], na.rm = TRUE),
+    .groups  = "drop"
+  ) |>
+  filter(n_years >= 20) |>
+  left_join(klasifikace |> select(iso_code, income_group, fossil_role, gdp_pc_mean),
+            by = "iso_code") |>
+  left_join(klasifikace_kultura |> select(iso_code, jazyk_skupina, nabozenstvi,
+                                          tertiarni_vzdelanost),
+            by = "iso_code")
+
+X <- cluster_data |>
+  select(pop_mean, gdp_mean, ei_mean, ci_mean) |>
+  scale()
+rownames(X) <- cluster_data$iso_code
+```
+
+```{r fig-cluster-pocet}
+#| eval: false
+#| fig-cap: Optimální počet clusterů – elbow metoda (hledáme bod lomu křivky).
+#| include: false
+set.seed(42)
+fviz_nbclust(X, kmeans, method = "wss") +
+  labs(title = NULL, x = "Počet clusterů k", y = "Celková suma čtverců uvnitř clusterů")
+```
+
+```{r fig-cluster-kmeans}
+#| fig-cap: "Clusterová analýza zemí podle průměrného profilu Kaya faktorů (k-means, k = 5). Zobrazeny první dvě hlavní komponenty (PCA)."
+set.seed(42)
+k  <- 5
+km <- kmeans(X, centers = k, nstart = 25)
+cluster_data$cluster <- factor(km$cluster)
+
+fviz_cluster(km, data = X,
+             geom = "point", ellipse.type = "convex",
+             palette = c("#D51317", "#007B3DFF", "#F39200", "#0094CD", "#95C11F"),
+             ggtheme = theme_minimal(),
+             labelsize = 7) +
+  labs(title = NULL, x = "PC1", y = "PC2")
+```
+
+Obrázek slouží především k vizualizaci výsledků shlukové analýzy v prostoru prvních dvou hlavních komponent. Je patrné, že jednotlivé shluky vykazují relativně dobrou separaci, což naznačuje existenci odlišných vzorců vývoje faktorů Kaya mezi skupinami zemí. Samotná interpretace shluků však vychází především z analýzy jejich centroidů a průměrných hodnot jednotlivých faktorů.
+
+```{r fig-cluster-profily}
+#| eval: false
+#| fig-cap: Průměrný Kaya profil každého clusteru (průměrná roční změna faktoru v % za 1990–2024).
+#| include: false
+
+cluster_data |>
+  group_by(cluster) |>
+  summarise(across(c(pop_mean, gdp_mean, ei_mean, ci_mean, co2_mean),
+                   \(x) mean(x, na.rm = TRUE)),
+            n = n(), .groups = "drop") |>
+  pivot_longer(c(pop_mean, gdp_mean, ei_mean, ci_mean),
+               names_to = "faktor", values_to = "hodnota") |>
+  mutate(faktor = preloz_faktory(faktor),
+         faktor = factor(faktor, levels = names(barvy_kaya)[1:4])) |>
+  ggplot(aes(x = faktor, y = hodnota, fill = faktor)) +
+  geom_col() +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  facet_wrap(~cluster, labeller = label_both) +
+  scale_fill_manual(values = barvy_kaya[1:4]) +
+  labs(x = NULL, y = "Průměrná roční změna (% /rok)", fill = NULL) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 35, hjust = 1))
+```
+
+```{r tbl-cluster-tabulka}
+#| tbl-cap: "Charakteristika identifikovaných shluků zemí podle průměrného profilu faktorů Kaya, úrovně vzdělání a role v obchodu s fosilními palivy."
+
+slovni_label <- function(x) {
+  factor(rank(x, ties.method = "first"),
+         levels = 1:5,
+         labels = c("nízký", "nižší", "neutrální", "vyšší", "vysoký"))
+}
+
+cluster_data |>
+  arrange(cluster, desc(pop_ref)) |>
+  group_by(cluster) |>
+  summarise(
+    `Počet zemí`                    = n(),
+    `Příklady` = paste(head(country, 6), collapse = ", "),
+    `Příjmová skupina (modus)`      = names(sort(table(income_group), decreasing = TRUE))[1],
+    `Exportéři FF (%)`              = paste0(round(mean(fossil_role == "Exportér FF",
+                                                         na.rm = TRUE) * 100), " %"),
+    pop_m  = mean(pop_mean, na.rm = TRUE),
+    gdp_m  = mean(gdp_mean, na.rm = TRUE),
+    ei_m   = mean(ei_mean,  na.rm = TRUE),
+    ci_m   = mean(ci_mean,  na.rm = TRUE),
+    co2_m  = mean(co2_mean, na.rm = TRUE),
+    `Terciární vzdělání (% med.)`   = round(median(tertiarni_vzdelanost, na.rm = TRUE), 0),
+    .groups = "drop"
+  ) |>
+  mutate(
+    `Δ Pop`         = slovni_label(pop_m),
+    `Δ HDP/obyv.`   = slovni_label(gdp_m),
+    `Δ Energie/HDP` = slovni_label(ei_m),
+    `Δ CO₂/Energie` = slovni_label(ci_m),
+    `Δ CO₂`         = slovni_label(co2_m)
+  ) |>
+  select(-pop_m, -gdp_m, -ei_m, -ci_m, -co2_m) |>
+  select(cluster, `Počet zemí`,
+         `Δ CO₂`, `Δ Pop`, `Δ HDP/obyv.`, `Δ Energie/HDP`, `Δ CO₂/Energie`,
+         `Příjmová skupina (modus)`, `Exportéři FF (%)`,
+         `Terciární vzdělání (% med.)`, `Příklady`) |>
+  kableExtra::kbl(booktabs = TRUE,
+                  align = c("c", "c", "c", "c", "c", "c", "c", "c", "c", "c", "l")) |>
+  kableExtra::kable_styling(full_width = TRUE, bootstrap_options = c("striped", "hover"))
+```
+
+## Interpretace jednotlivých shluků:
+
+-   **Rychle rostoucí exportéry fosilních paliv** (shluk 1): Růst emisí je tažen současně populačním růstem, růstem HDP na obyvatele i rostoucí uhlíkovou náročností energie.
+-   **Dekarbonizující se ekonomiky** (shluk 2): Emise rostou pomalu nebo klesají díky výraznému zlepšování energetické efektivity a nízké uhlíkové náročnosti.
+-   **Chudé, zalidněné a strukturálně nestabilní ekonomiky** (shluk 3): Emise jsou relativně stabilní, ale jejich vývoj je silně ovlivňován změnami energetické a uhlíkové náročnosti a populačním růstem spíše než ekonomickým růstem.
+-   **Industrializující se ekonomiky s rychlým růstem emisí** (shluk 4): Nejvýznamnějším zdrojem růstu emisí je rychlý růst HDP na obyvatele. Typickými příklady jsou Čína, Indie nebo Indonésie.
+-   **Vyspělé ekonomiky s decouplingem** (shluk 5): Země s dlouhodobě vysokými příjmy a nejvyšším podílem terciárně vzdělaného obyvatelstva, které dokázaly ekonomický růst oddělit od růstu emisí díky zlepšování energetické a emisní efektivity. Do této skupiny patří například Spojené státy, Německo, Japonsko, Spojené království, ale také Česká republika.
+
+<!-- # Česká republika -->
+
+<!-- Česká republika je silně průmyslová ekonomika s historicky vysokým podílem uhlí v energetickém mixu. Transformace po roce 1989 sice přinesla pokles emisí, ale otázkou je, zda jde o skutečný decoupling, nebo jen o deindustrializaci a přesun výroby. -->
+
+<!-- ```{r fig-kaya-cz} -->
+
+<!-- #| fig-cap: "Kaya dekompozice emisí CO₂ pro Českou republiku, 1990–2024." -->
+
+<!-- #| fig-height: 4.5 -->
+
+<!-- plot_kaya(kaya, "Czechia", interaktivni = TRUE) -->
+
+<!-- ``` -->
+
+<!-- ## Porovnání se sousedy -->
+
+<!-- ```{r eu-sousede} -->
+
+<!-- eu_sousede <- c("Czechia", "Germany", "Poland", "Austria", "Slovakia", "Hungary") -->
+
+<!-- ``` -->
+
+<!-- ```{r fig-decoupling-cz} -->
+
+<!-- #| fig-cap: "Decoupling index ČR a sousedních zemí: HDP a CO₂ (1990 = 100)." -->
+
+<!-- #| fig-height: 4.5 -->
+
+<!-- kaya |> -->
+
+<!--   filter(country %in% eu_sousede, !is.na(gdp), !is.na(co2)) |> -->
+
+<!--   group_by(country) |> -->
+
+<!--   mutate( -->
+
+<!--     gdp_idx = gdp / first(gdp[year == min(year[!is.na(gdp)])]) * 100, -->
+
+<!--     co2_idx = co2 / first(co2[year == min(year[!is.na(co2)])]) * 100 -->
+
+<!--   ) |> -->
+
+<!--   pivot_longer(c(gdp_idx, co2_idx), names_to = "ukazatel", values_to = "hodnota") |> -->
+
+<!--   mutate( -->
+
+<!--     ukazatel = recode(ukazatel, "gdp_idx" = "HDP", "co2_idx" = "CO₂"), -->
+
+<!--     country  = recode(country, "Czechia" = "Česká republika") -->
+
+<!--   ) |> -->
+
+<!--   ggplot(aes(x = year, y = hodnota, color = ukazatel, group = ukazatel)) + -->
+
+<!--   geom_line(linewidth = 0.8) + -->
+
+<!--   geom_hline(yintercept = 100, linetype = "dashed", color = "gray60") + -->
+
+<!--   facet_wrap(~country, ncol = 3) + -->
+
+<!--   scale_color_manual(values = c("HDP" = "#007B3DFF", "CO₂" = "#D51317")) + -->
+
+<!--   scale_x_continuous(breaks = c(1990, 2005, 2023)) + -->
+
+<!--   labs(x = NULL, y = "Index (1990 = 100)", color = NULL) + -->
+
+<!--   theme(legend.position = "bottom", -->
+
+<!--         strip.text = element_text(face = "bold", size = 8)) -->
+
+<!-- ``` -->
+
+<!-- ```{r fig-co2pc-cz} -->
+
+<!-- #| fig-cap: "Emise CO₂ na obyvatele (t/os.) pro ČR a sousední státy, 1990–2024." -->
+
+<!-- #| fig-height: 3.5 -->
+
+<!-- kaya |> -->
+
+<!--   filter(country %in% eu_sousede, !is.na(co2), !is.na(population)) |> -->
+
+<!--   mutate( -->
+
+<!--     co2_pc  = co2 * 1e6 / population, -->
+
+<!--     country = recode(country, "Czechia" = "Česká republika") -->
+
+<!--   ) |> -->
+
+<!--   ggplot(aes(x = year, y = co2_pc, color = country)) + -->
+
+<!--   geom_line(linewidth = 0.8) + -->
+
+<!--   scale_x_continuous(breaks = seq(1990, 2024, by = 5)) + -->
+
+<!--   labs(x = NULL, y = "t CO₂ / obyvatele", color = NULL) + -->
+
+<!--   theme(legend.position = "bottom") -->
+
+<!-- ``` -->
+
+## Pozice ČR v clusterové analýze
+
+```{r tbl-cz-cluster}
+#| tbl-cap: "Průměrný Kaya profil ČR (1990–2024) a průměr jejího clusteru."
+#| echo: false
+
+cz_cluster <- cluster_data |>
+  filter(iso_code == "CZE") |>
+  pull(cluster)
+
+bind_rows(
+  cluster_data |>
+    filter(iso_code == "CZE") |>
+    mutate(skupina = "Česká republika"),
+  cluster_data |>
+    filter(cluster == cz_cluster) |>
+    summarise(across(c(pop_mean, gdp_mean, ei_mean, ci_mean, co2_mean),
+                     \(x) mean(x, na.rm = TRUE)),
+              .groups = "drop") |>
+    mutate(skupina = paste0("Průměr clusteru ", cz_cluster),
+           iso_code = NA, country = NA, cluster = cz_cluster)
+) |>
+  select(skupina, pop_mean, gdp_mean, ei_mean, ci_mean, co2_mean) |>
+  rename(
+    `Skupina`        = skupina,
+    `Δ Populace`     = pop_mean,
+    `Δ HDP/obyv.`    = gdp_mean,
+    `Δ Energie/HDP`  = ei_mean,
+    `Δ CO₂/Energie`  = ci_mean,
+    `Δ CO₂ (skuteč.)` = co2_mean
+  ) |>
+  mutate(across(where(is.numeric), \(x) round(x, 2))) |>
+  kableExtra::kbl(booktabs = TRUE, align = c("l", rep("c", 5))) |>
+  kableExtra::kable_styling(full_width = FALSE, bootstrap_options = c("striped"))
+```
+
+Česká republika vykazuje ve srovnání s průměrem clusteru 5 rychlejší růst HDP na obyvatele a výraznější pokles energetické náročnosti ekonomiky, což vede k rychlejšímu snižování emisí CO₂.
+
+# Závěr
+
+Analýza potvrdila, že změny emisí CO₂ nelze vysvětlit jediným faktorem. Zatímco v rozvojových zemích hraje významnou roli **růst populace a ekonomický růst**, ve vyspělých ekonomikách jsou emise stále více ovlivňovány **energetickou efektivitou a uhlíkovou náročností energetického mixu**. Korelační analýza ukázala, že právě energetická a uhlíková náročnost představují nejsilnější determinanty meziročních změn emisí.
+
+## Optimistické signály
+
+-   **Absolutní decoupling je dosažitelný.** Řada vyspělých zemí (např. Francie, Německo, Japonsko, Norsko, Spojené království, Spojené státy či Česko) snižují absolutní emise při rostoucím HDP. Ukazuje to, že ekonomický růst a klimatické cíle nejsou nutně v konfliktu.
+-   **Emisní náročnost energie (CO₂/Energie) klesá téměř globálně.** Expanze obnovitelných zdrojů, zvyšování energetické efektivity a substituce uhlí zemním plynem se projevuje i v datech. Stejně tak přijetí Pařížské klimatické dohody.
+-   **Energetická náročnost ekonomiky (Energie/HDP) v posledních dvou letech klesl.** Ekonomiky jsou efektivnější – na jednotku výstupu spotřebujeme méně energie. Tento pokles je patrný napříč příjmovými skupinami i mezi exportéry a dovozci fosilních paliv. Významnou roli při snižování emisí jistě hrajepostupná dekarbonizace energetického mixu.
+-   Ve vysokopříjmových zemích lze pozorovat dlouhodobý pokles emisí na obyvatele.
+-   **Vyšší úroveň vzdělání bývá spojena s nižším růstem emisí**, což naznačuje význam technologického pokroku, inovací a přechodu ke znalostní ekonomice.
+
+## Znepokojivé signály
+
+-   **Absolutní emise CO₂ globálně nadále rostou.** Pokles emisí ve vyspělých zemích je převážen růstem emisí v Číně, Indii a dalších rozvíjejících se ekonomikách, kde zůstává dominantním faktorem růst HDP na obyvatele.
+
+-   **Relativní decoupling** (např. Čína či Indonésie) **sám o sobě nestačí.** Mnoho vyšších středně příjmových ekonomik sice snižuje energetickou a emisní náročnost, avšak absolutní emise dále rostou, protože ekonomický růst je rychlejší než dosažené úspory.
+
+-   **Přetrvávají výrazné rozdíly mezi vyspělými a rozvojovými zeměmi.** Ve většině rozvíjejících se ekonomik zůstává hospodářský růst úzce spojen s růstem emisí. Zároveň emise na obyvatele zůstávají ve vysokopříjmových zemích mnohonásobně vyšší než v chudších státech, a to navzdory dlouhodobému poklesu.
+
+-   Nejrychlejší nárůsty emisí vykazují země kombinující rychlý populační růst a růst HDP na obyvatele.
+
+-   **Pandemie COVID-19 nepředstavovala strukturální zlom.** Již v roce 2021 se emise ve většině zemí vrátily na předpandemické úrovně nebo je překonaly.
+
+-   **Sankce samy o sobě nemusí snižovat emise.** Sankcionované země mohou nalézt nové obchodní partnery nebo přejít na méně efektivní a emisně náročnější technologie, což omezuje klimatický přínos ekonomických sankcí.
+
+## Identifikované typy zemí
+
+Shluková analýza odhalila pět relativně odlišných skupin zemí:
+
+1.  **Rychle rostoucí exportéři fosilních paliv** – vysoký růst populace, ekonomiky i emisí.
+
+2.  **Dekarbonizující se ekonomiky** – emise rostou pomalu nebo klesají díky zlepšování energetické efektivity.
+
+3.  **Chudé, zalidněné a strukturálně nestabilní ekonomiky** – nízký růst HDP, významný vliv populační dynamiky.
+
+4.  **Industrializující se rozvíjející ekonomiky** – růst emisí tažený především růstem HDP na obyvatele.
+
+5.  **Vyspělé ekonomiky s decouplingem** – nízký populační růst, vysoká vzdělanost a postupné oddělování ekonomického růstu od emisí.
+
+## Historické zlomy
+
+-   **1990–1994**: Rozpad sovětského bloku – dramatický pokles emisí v postkomunistických zemích (deindustrializace, ne klimatická politika)
+
+-   **2008–2009**: Globální finanční krize – pokles emisí v bohatých zemích; rozvíjející se ekonomiky pokračovaly v růstu
+
+-   **2015**: Pařížská dohoda – politický závazek; v datech zatím jen postupná akcelerace trendu
+
+-   **2020**: COVID-19 – největší jednorázový pokles od druhé světové války (\~7 % globálně)
+
+-   **2021–2022**: Rychlý návrat emisí, zejména v důsledku obnovy průmyslu a energetické krize po invazi na Ukrajinu
+
+## Možnosti dalšího rozšíření
+
+-   Rozšířit analýzu o **panelové regresní modely**, které umožní kvantifikovat vliv jednotlivých faktorů při současné kontrole ostatních proměnných.
+
+-   Zahrnout další charakteristiky zemí, například **institucionální kvalitu, klimatickou politiku, energetickou bezpečnost, technologickou vyspělost, meteorologické faktory, dominantního energetického zdroje**.
+
+-   **Zpřesnění klasifikace exportérů fosilních paliv** pomocí ročních dat z EIA namísto průměru za celé období, což by lépe zachytilo změny v čase. Dále **analýza výhradních dovozců fosilních paliv**, kteří tvoří malou, ale zajímavou skupinu zemí s odlišnou energetickou strukturou.
+
+-   **Samostatná analýza postsovětských a postkomunistických zemí**, které prošly specifickou ekonomickou transformací spojenou s výrazným poklesem energetické náročnosti.
+
+-   Analyzovat samostatně dopady významných událostí, jako byly **finanční krize, pandemie COVID-19, energetická krize či geopolitické konflikty**.
+
+-   **Statistické testování vztahu mezi kategoriálními charakteristikami zemí a úrovní emisí CO₂**, například pomocí kontingenčních tabulek a chí-kvadrát testů.
+
+-   **Modelování bodu obratu (turning point)**, při kterém se hospodářský růst začíná projevovat poklesem energetické náročnosti a následně i emisí, například v duchu environmentální Kuznetsovy křivky.
+
+-   **Rozlišení produkčních a spotřebních emisí**, které by umožnilo lépe zachytit vliv offshoringu a mezinárodního obchodu na emisní bilanci jednotlivých zemí.
+
+-   Ověřit stabilitu výsledků pomocí alternativních metod dekompozice a jiných přístupů ke shlukové analýze.
