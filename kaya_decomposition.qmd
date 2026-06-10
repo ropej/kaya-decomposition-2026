@@ -395,9 +395,9 @@ Emise oxidu uhličitého (CO₂) patří mezi hlavní příčiny probíhající 
 
 Cílem této práce je analyzovat vývoj emisí CO₂ ve světě v letech 1990–2024 pomocí Kaya identity, která umožňuje rozložit změny emisí na příspěvky populace, HDP na obyvatele, energetické náročnosti ekonomiky a emisní náročnosti energie. Součástí analýzy je také srovnání různých skupin zemí, posouzení míry oddělení ekonomického růstu od emisí (decoupling) a identifikace typických emisních trajektorií pomocí shlukové analýzy.
 
-## Kaya dekompoice
+## Kaya dekompozice
 
-**Kaya dekompoice** (tzv. Kaya identita) je matematický vzorec vyvinutý japonským energetickým ekonomem Joičim Kayou. Používá se k analýze a vyčíslení hlavních faktorů ovlivňujících celkové emise skleníkových plynů (zejména CO₂) z lidské činnosti. Vzorec rozkládá celkové emise CO₂ rozkládá celkové emise na součin čtyř základních faktorů:
+**Kaya dekompozice** (tzv. Kaya identita) je matematický vzorec vyvinutý japonským energetickým ekonomem Joičim Kayou. Používá se k analýze a vyčíslení hlavních faktorů ovlivňujících celkové emise skleníkových plynů (zejména CO₂) z lidské činnosti. Vzorec rozkládá celkové emise CO₂ rozkládá celkové emise na součin čtyř základních faktorů:
 
 $$\text{CO}_2 = P \times \frac{\text{HDP}}{P} \times \frac{E}{\text{HDP}} \times \frac{\text{CO}_2}{E}$$
 
