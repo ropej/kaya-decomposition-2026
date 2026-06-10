@@ -518,7 +518,10 @@ plot_kaya <- function(data, nazev_statu, interaktivni = FALSE) {
           plot.title = element_text(face = "bold"))
 
   if (interaktivni) {
-    p_ly <- ggplotly(p, tooltip = "text") |> config(displayModeBar = FALSE)
+    p_ly <- ggplotly(p, tooltip = "text") |>
+      config(displayModeBar = TRUE, displaylogo = FALSE,
+             modeBarButtonsToRemove = c("pan2d", "select2d", "lasso2d",
+               "hoverClosestCartesian", "hoverCompareCartesian", "toggleSpikelines"))
     seen <- character()
     for (i in seq_along(p_ly$x$data)) {
       nm <- p_ly$x$data[[i]]$name
@@ -877,7 +880,9 @@ p_co2_pc <- co2_pc_data |>
   theme(legend.position = "bottom")
 
 ggplotly(p_co2_pc, tooltip = "text") |>
-  config(displayModeBar = FALSE)
+  config(displayModeBar = TRUE, displaylogo = FALSE,
+         modeBarButtonsToRemove = c("pan2d", "select2d", "lasso2d",
+           "hoverClosestCartesian", "hoverCompareCartesian", "toggleSpikelines"))
 ```
 
 Graf zachycuje **dlouhodobý pokles** emisí CO₂ na obyvatele **ve vysokopříjmových zemích**, kde medián klesl z přibližně 7 na 5,3 t CO₂ na obyvatele. Naopak **ve vyšších středně příjmových zemích** emise na obyvatele téměř **zdvojnásobily svou úroveň**, což souvisí s rychlou industrializací a ekonomickým růstem. U nižších středně příjmových a nízkopříjmových zemí zůstávají emise výrazně nižší, přesto i zde lze pozorovat pozvolný růst.
@@ -1003,9 +1008,12 @@ p_scatter <- ggplot(decoupling_df,
   geom_abline(slope = 1, intercept = 0, color = "gray70", linetype = "dotted") +
   geom_point(aes(text = text), alpha = 0.75, size = 2) +
   scale_color_manual(values = barvy_status) +
+  scale_x_continuous(breaks = seq(-1000, 2200, by = 200)) +
+  scale_y_continuous(breaks = seq(-1000, 2200, by = 200)) +
   labs(x = paste0("Kumulativní změna HDP 2000–", year_end_gdp, " (%)"),
        y = paste0("Kumulativní změna CO₂ 2000–", year_end_gdp, " (%)"),
        color = NULL) +
+  coord_equal() +
   theme(legend.position = "bottom")
 
 labeled_pts <- decoupling_df |>
@@ -1063,11 +1071,13 @@ annotations <- lapply(seq_len(n), function(i) {
 })
 
 ggplotly(p_scatter, tooltip = "text") |>
-  layout(annotations = annotations) |>
+  layout(annotations = annotations,
+         xaxis = list(range = c(-300, 1200)),
+         yaxis = list(range = c(-100, 600))) |>
   config(displayModeBar = TRUE, displaylogo = FALSE,
-         modeBarButtonsToRemove = c("toImage", "pan2d", "select2d", "lasso2d",
-                                    "hoverClosestCartesian", "hoverCompareCartesian",
-                                    "toggleSpikelines"))
+         modeBarButtonsToRemove =
+           c("pan2d", "select2d", "lasso2d", "hoverClosestCartesian",
+             "hoverCompareCartesian", "toggleSpikelines"))
 ```
 
 Oba grafy ukazují, že **absolutní decoupling** je typický především pro **vyspělé ekonomiky**, jako jsou Francie, Německo, Japonsko, Norsko, Polsko, Spojené království, Česko a Spojené státy, kde HDP dlouhodobě roste při současné stagnaci nebo poklesu emisí CO₂. Naproti tomu **Čína, Indie, Indonésie a Saúdská Arábie** vykazují převážně **relativní decoupling** – emise zde nadále rostou, avšak pomaleji než ekonomika.
@@ -1201,8 +1211,11 @@ p_vzd <- ggplot(vzd_data,
             inherit.aes = FALSE, color = "gray30", linewidth = 0.6, linetype = "dashed") +
   geom_point(aes(text = text, group = income_group), size = 2) +
   scale_color_manual(values = barvy_income) +
-  labs(x = "Hrubá míra terciárního vzdělání, průměr 2010–2019 (%)",
-       y = "Průměrná roční změna CO₂ (% /rok, 1990–2024)",
+  # coord_equal() +
+  scale_x_continuous(labels = scales::label_percent(scale = 1)) +
+  scale_y_continuous(labels = scales::label_percent(scale = 1)) +
+  labs(x = "Hrubá míra terciárního vzdělání (2010–2019)",
+       y = "Průměrná roční změna CO₂ (1990–2024)",
        color = NULL) +
   theme(legend.position = "bottom")
 
@@ -1263,7 +1276,10 @@ annotations_vzd <- lapply(seq_len(n2), function(i) {
 ggplotly(p_vzd, tooltip = "text") |>
   layout(annotations = annotations_vzd) |>
   style(opacity = .15, traces = 2) |>
-  config(displayModeBar = FALSE)
+  config(displayModeBar = TRUE, displaylogo = FALSE,
+         modeBarButtonsToRemove =
+           c("pan2d", "select2d", "lasso2d", "hoverClosestCartesian",
+             "hoverCompareCartesian", "toggleSpikelines"))
 ```
 
 Graf naznačuje **záporný vztah mezi úrovní terciárního vzdělání a růstem emisí CO₂**. Země s vyšším podílem obyvatel s terciárním vzděláním dosahují v průměru nižšího růstu emisí, případně jejich poklesu. Naopak nejvyšší přírůstky emisí jsou patrné zejména u zemí s nižší úrovní vzdělání, jako jsou **Indonésie, Indie, Čína nebo Saúdská Arábie**.
@@ -1505,7 +1521,7 @@ cluster_data |>
 -   **Dekarbonizující se ekonomiky** (shluk 2): Emise rostou pomalu nebo klesají díky výraznému zlepšování energetické efektivity a nízké uhlíkové náročnosti.
 -   **Chudé, převážně africké, zalidněné a strukturálně nestabilní ekonomiky** (shluk 3): Emise jsou relativně stabilní, ale jejich vývoj je silně ovlivňován změnami energetické a uhlíkové náročnosti a populačním růstem spíše než ekonomickým růstem.
 -   **Industrializující se ekonomiky s rychlým růstem emisí** (shluk 4): Nejvýznamnějším zdrojem růstu emisí je rychlý růst HDP na obyvatele. Typickými příklady jsou Čína, Indie nebo Indonésie.
--   **Vyspělé ekonomiky s decouplingem** (shluk 5): Země přebážně z evropy a USA s dlouhodobě vysokými příjmy a nejvyšším podílem terciárně vzdělaného obyvatelstva, které dokázaly ekonomický růst oddělit od růstu emisí díky zlepšování energetické a emisní efektivity. Do této skupiny patří například Spojené státy, Německo, Japonsko, Spojené království, ale také Česká republika.
+-   **Vyspělé ekonomiky s decouplingem** (shluk 5): Země převážně z Evropy a USA s dlouhodobě vysokými příjmy a nejvyšším podílem terciárně vzdělaného obyvatelstva, které dokázaly ekonomický růst oddělit od růstu emisí díky zlepšování energetické a emisní efektivity. Do této skupiny patří například Spojené státy, Německo, Japonsko, Spojené království, ale také Česká republika.
 
 ```{r fig-cluster-kaya}
 #| fig-cap: "Průměrné příspěvky Kaya faktorů podle shluku zemí, 1990–2024. Tečka = průměrná skutečná změna CO₂."
@@ -1703,15 +1719,10 @@ Analýza potvrdila, že změny emisí CO₂ nelze vysvětlit jediným faktorem. 
 ## Znepokojivé signály
 
 -   **Absolutní emise CO₂ globálně nadále rostou.** Pokles emisí ve vyspělých zemích je převážen růstem emisí v Číně, Indii a dalších rozvíjejících se ekonomikách, kde zůstává dominantním faktorem růst HDP na obyvatele.
-
 -   **Relativní decoupling** (např. Čína či Indonésie) **sám o sobě nestačí.** Mnoho vyšších středně příjmových ekonomik sice snižuje energetickou a emisní náročnost, avšak absolutní emise dále rostou, protože ekonomický růst je rychlejší než dosažené úspory.
-
 -   **Přetrvávají výrazné rozdíly mezi vyspělými a rozvojovými zeměmi.** Ve většině rozvíjejících se ekonomik zůstává hospodářský růst úzce spojen s růstem emisí. Zároveň emise na obyvatele zůstávají ve vysokopříjmových zemích mnohonásobně vyšší než v chudších státech, a to navzdory dlouhodobému poklesu.
-
 -   Nejrychlejší nárůsty emisí vykazují země kombinující rychlý populační růst a růst HDP na obyvatele.
-
 -   **Pandemie COVID-19 nepředstavovala strukturální zlom.** Již v roce 2021 se emise ve většině zemí vrátily na předpandemické úrovně nebo je překonaly.
-
 -   **Sankce samy o sobě nemusí snižovat emise.** Sankcionované země mohou nalézt nové obchodní partnery nebo přejít na méně efektivní a emisně náročnější technologie, což omezuje klimatický přínos ekonomických sankcí.
 
 ## Identifikované typy zemí
@@ -1719,43 +1730,27 @@ Analýza potvrdila, že změny emisí CO₂ nelze vysvětlit jediným faktorem. 
 Shluková analýza odhalila pět relativně odlišných skupin zemí:
 
 1.  **Rychle rostoucí exportéři fosilních paliv** – vysoký růst populace, ekonomiky i emisí.
-
 2.  **Dekarbonizující se ekonomiky** – emise rostou pomalu nebo klesají díky zlepšování energetické efektivity.
-
 3.  **Chudé, zalidněné a strukturálně nestabilní ekonomiky** – nízký růst HDP, významný vliv populační dynamiky.
-
 4.  **Industrializující se rozvíjející ekonomiky** – růst emisí tažený především růstem HDP na obyvatele.
-
 5.  **Vyspělé ekonomiky s decouplingem** – nízký populační růst, vysoká vzdělanost a postupné oddělování ekonomického růstu od emisí.
 
 ## Historické zlomy
 
 -   **1990–1994**: Rozpad sovětského bloku – dramatický pokles emisí v postkomunistických zemích (deindustrializace, ne klimatická politika)
-
 -   **2008–2009**: Globální finanční krize – pokles emisí v bohatých zemích; rozvíjející se ekonomiky pokračovaly v růstu
-
 -   **2015**: Pařížská dohoda – politický závazek; v datech zatím jen postupná akcelerace trendu
-
 -   **2020**: COVID-19 – největší jednorázový pokles od druhé světové války (\~7 % globálně)
-
 -   **2021–2022**: Rychlý návrat emisí, zejména v důsledku obnovy průmyslu a energetické krize po invazi na Ukrajinu
 
 ## Možnosti dalšího rozšíření
 
 -   Rozšířit analýzu o **panelové regresní modely**, které umožní kvantifikovat vliv jednotlivých faktorů při současné kontrole ostatních proměnných.
-
 -   Zahrnout další charakteristiky zemí, například **institucionální kvalitu, klimatickou politiku, energetickou bezpečnost, technologickou vyspělost, meteorologické faktory, dominantního energetického zdroje**.
-
 -   **Zpřesnění klasifikace exportérů fosilních paliv** pomocí ročních dat z EIA namísto průměru za celé období, což by lépe zachytilo změny v čase. Dále **analýza výhradních dovozců fosilních paliv**, kteří tvoří malou, ale zajímavou skupinu zemí s odlišnou energetickou strukturou.
-
 -   **Samostatná analýza postsovětských a postkomunistických zemí**, které prošly specifickou ekonomickou transformací spojenou s výrazným poklesem energetické náročnosti.
-
 -   Analyzovat samostatně dopady významných událostí, jako byly **finanční krize, pandemie COVID-19, energetická krize či geopolitické konflikty**.
-
 -   **Statistické testování vztahu mezi kategoriálními charakteristikami zemí a úrovní emisí CO₂**, například pomocí kontingenčních tabulek a chí-kvadrát testů.
-
 -   **Modelování bodu obratu (turning point)**, při kterém se hospodářský růst začíná projevovat poklesem energetické náročnosti a následně i emisí, například v duchu environmentální Kuznetsovy křivky.
-
 -   **Rozlišení produkčních a spotřebních emisí**, které by umožnilo lépe zachytit vliv offshoringu a mezinárodního obchodu na emisní bilanci jednotlivých zemí.
-
 -   Ověřit stabilitu výsledků pomocí alternativních metod dekompozice a jiných přístupů ke shlukové analýze.
