@@ -66,6 +66,7 @@ table th {
 
 ```{r setup}
 #| echo: false
+#| message: false
 # Potřebné knihovny
 library(dplyr)
 library(tidyr)
@@ -485,7 +486,7 @@ plot_kaya <- function(data, nazev_statu, interaktivni = FALSE) {
     pivot_longer(c(d_pop, d_gdp_pc, d_ei, d_ci, interactions),
                  names_to = "faktor", values_to = "hodnota") |>
     mutate(faktor = preloz_faktory(faktor),
-           faktor = factor(faktor, levels = names(barvy_kaya)[1:5]))
+           faktor = factor(faktor, levels = rev(names(barvy_kaya)[1:5])))
 
   co2_pts <- data |>
     filter(country == nazev_statu, !is.na(d_co2_actual)) |>
@@ -505,8 +506,15 @@ plot_kaya <- function(data, nazev_statu, interaktivni = FALSE) {
     geom_line(data = co2_pts, aes(x = year, y = d_co2_actual), 
               color = '#222222') +
     geom_hline(yintercept = 0, color = "gray40", linewidth = 0.4) +
-    scale_fill_manual(values = barvy_kaya[1:5], name = NULL) +
-    scale_color_manual(values = c("Fosilní CO₂" = "#222222"), name = NULL) +
+    scale_fill_manual(values = barvy_kaya[1:5], breaks = names(barvy_kaya)[1:5],
+                      labels = if (!interaktivni) expression(
+                        "Populace", "HDP/obyvatele", "Energie/HDP",
+                        "CO"[2]*"/Energie", "Interakce"
+                      ) else waiver(),
+                      name = NULL) +
+    scale_color_manual(values = c("Fosilní CO₂" = "#222222"),
+                       labels = if (interaktivni) waiver() else expression("Fosilní CO"[2]),
+                       name = NULL) +
     guides(fill  = guide_legend(order = 1),
            color = guide_legend(order = 2,
                                 override.aes = list(size = 2, linetype = 0,
@@ -528,7 +536,10 @@ plot_kaya <- function(data, nazev_statu, interaktivni = FALSE) {
       nm <- p_ly$x$data[[i]]$name
       if (!is.null(nm) && nzchar(nm)) {
         clean <- gsub("^\\((.+),\\s*\\d+\\)$", "\\1", nm)
+        rank  <- match(clean, names(barvy_kaya))
+        if (!is.na(rank)) p_ly$x$data[[i]]$legendrank <- rank * 100
         clean <- gsub("CO2", "CO₂", clean)
+        clean <- gsub("CO₂", "CO<sub>2</sub>", clean)
         p_ly$x$data[[i]]$name <- clean
         if (clean %in% seen) {
           p_ly$x$data[[i]]$showlegend <- FALSE
@@ -574,27 +585,67 @@ Z datasetu byly vyřazeny všechny agregátní záznamy (kódy začínající `^
 #| tbl-cap: "Souhrnné statistiky proměnných CO₂, HDP, populace a energetické efektivity."
 datasummary_skim(
   owid |>
-    select(
-      co2,
-      gdp,
-      population,
-      energy_per_gdp,
-      co2_per_unit_energy
-    )
-  )
+    transmute(
+      `CO₂ (Mt)`                  = co2,
+      `HDP (bil. USD)`            = gdp / 1e12,
+      `Populace (mil.)`           = population / 1e6,
+      `Energie/HDP (kWh/USD)`     = energy_per_gdp,
+      `CO₂/Energie (kg CO₂/kWh)` = co2_per_unit_energy
+    ),
+  fmt = 2
+)
 ```
 
 Dataset obsahuje několik tisíc unikátních hodnot pro všechny sledované proměnné. Počet chybějících hodnot je ve vztahu k velikosti datového souboru zanedbatelný – nejvíce (0,4 %) jich obsahují proměnné HDP a energetická náročnost ekonomiky. Histogramy naznačují široké rozpětí hodnot a přítomnost několika extrémních pozorování, což odpovídá značným rozdílům mezi zeměmi z hlediska velikosti ekonomiky, populace i emisí CO₂.
 
-```{r tbl-income-classification}
+```{r fig-income-classification}
 #| echo: false
-#| tbl-cap: "Rozdělení zemí podle příjmové skupiny Světové banky."
-datasummary_skim(
-  gdp_pc_ref |> 
-    select(income_group) |>
-    mutate(across(c(income_group), ~ remove_accents(.x))),
-  escape = FALSE
+#| fig-cap: "Rozdělení zemí podle příjmové skupiny Světové banky."
+#| fig-height: 2
+income_data <- gdp_pc_ref |>
+  mutate(
+    income_group = factor(
+      if_else(is.na(income_group), "Neuvedeno", as.character(income_group)),
+      levels = c("Vysoký příjem", "Vyšší střední příjem",
+                 "Nižší střední příjem", "Nízký příjem", "Neuvedeno")
+    )
+  ) |>
+  count(income_group, .drop = TRUE) |>
+  mutate(
+    pct  = n / sum(n) * 100,
+    text = paste0("Příjmová skupina: ", income_group,
+                  "<br>Počet zemí: ", n,
+                  "<br>Procento: ", format(round(pct, 2), nsmall = 2), " %")
   )
+
+barvy_income_plot <- c(
+  "Nízký příjem"         = barvy[4],
+  "Nižší střední příjem" = barvy[3],
+  "Vyšší střední příjem" = barvy[2],
+  "Vysoký příjem"        = barvy[1],
+  "Neuvedeno"            = 'gray50'
+)
+
+p_income <- ggplot(income_data,
+                   aes(x = pct, y = "", fill = income_group, text = text)) +
+  geom_col(position = "stack", width = 0.5) +
+  scale_fill_manual(values = barvy_income_plot, name = NULL) +
+  scale_x_continuous(labels = scales::label_percent(scale = 1, accuracy = 1),
+                     breaks = seq(0, 100, by = 20),
+                     expand = expansion(mult = c(0, 0.01))) +
+  labs(x = NULL, y = NULL) +
+  theme(axis.text.y   = element_blank(),
+        axis.ticks.y  = element_blank(),
+        legend.position  = "bottom",
+        legend.direction = "horizontal",
+        legend.key.size  = unit(0.4, "cm"))
+
+ggplotly(p_income, tooltip = "text") |>
+  layout(legend = list(orientation = "h", xanchor = "center",
+                       x = 0.5, y = -0.3, yanchor = "top")) |>
+  config(displayModeBar = TRUE, displaylogo = FALSE,
+         modeBarButtonsToRemove = c("pan2d", "select2d", "lasso2d",
+           "hoverClosestCartesian", "hoverCompareCartesian", "toggleSpikelines"))
 ```
 
 **Příjmová skupina** byla odvozena z průměrného HDP na obyvatele za roky 2010–2019 (konstantní USD 2011, PPP). Použité hranice – 12 000, 4 000 a 1 000 USD – jsou vlastní kategorizací a nepřebírají přímo metodiku Světové banky, která pracuje s HNP na obyvatele v běžných USD. V analyzovaném souboru převažují země s vysokými příjmy (50 %) a vyššími středními příjmy (24 %). Země s nižšími středními příjmy tvoří přibližně pětinu souboru, zatímco nízkopříjmové země jsou zastoupeny pouze okrajově (4 %).
@@ -614,15 +665,74 @@ datasummary_skim(
 
 Zprůměrované proměnné čistého exportu ropy, zemního plynu a uhlí obsahují přibližně jen 0,9 % chybějících hodnot. U dostupných pozorování je patrná **vysoká variabilita a výrazná asymetrie** rozdělení, což odráží existenci několika málo významných exportérů vedle převahy zemí s nízkým nebo záporným čistým exportem.
 
-```{r tbl-fossil-classification}
+```{r fig-fossil-classification}
 #| echo: false
-#| tbl-cap: "Zastoupení zemí podle role v mezinárodním obchodu s fosilními palivy."
-datasummary_skim(
-  exporteri_owid |> 
+#| fig-cap: "Zastoupení zemí podle role v mezinárodním obchodu s fosilními palivy."
+#| fig-height: 4
+fossil_data <- bind_rows(
+  exporteri_owid |>
     select(vyvoz_ropa, vyvoz_plyn, vyvoz_uhli, fossil_role) |>
-    mutate(across(c(fossil_role), ~ remove_accents(.x))),
-  escape = FALSE
-  )
+    mutate(across(where(is.logical), as.character)) |>
+    pivot_longer(everything(), names_to = "promena", values_to = "hodnota_raw"),
+  klasifikace |>
+    transmute(promena = "pure_fossil_exporter",
+              hodnota_raw = as.character(pure_fossil_exporter))
+) |>
+  mutate(
+    hodnota = case_when(
+      is.na(hodnota_raw)    ~ "Neuvedeno",
+      hodnota_raw == "TRUE" ~ "Ano",
+      hodnota_raw == "FALSE"~ "Ne",
+      TRUE                  ~ hodnota_raw
+    ),
+    promena = factor(recode(promena,
+      "vyvoz_ropa"           = "Čistý export ropy",
+      "vyvoz_plyn"           = "Čistý export plynu",
+      "vyvoz_uhli"           = "Čistý export uhlí",
+      "fossil_role"          = "FF role",
+      "pure_fossil_exporter" = "Výhradní exportér FF"
+    ), levels = c("Čistý export ropy", "Čistý export plynu", "Čistý export uhlí",
+                  "FF role", "Výhradní exportér FF"))
+  ) |>
+  count(promena, hodnota) |>
+  group_by(promena) |>
+  mutate(
+    pct  = n / sum(n) * 100,
+    text = paste0("Hodnota: ", hodnota,
+                  "<br>Počet zemí: ", n,
+                  "<br>Procento: ", format(round(pct, 2), nsmall = 2), " %")
+  ) |>
+  ungroup() |>
+  mutate(hodnota = factor(hodnota, levels = c(
+    "Ano", "Ne", "Exportér FF", "Importér / neutrální", "Neuvedeno"
+  )))
+
+barvy_fossil <- c(
+  "Ano"                  = barvy[5],
+  "Ne"                   = barvy[1],
+  "Exportér FF"          = barvy[2],
+  "Importér / neutrální" = barvy[6],
+  "Neuvedeno"            = "#8c8c8c"
+)
+
+p_fossil <- ggplot(fossil_data,
+                   aes(x = promena, y = pct, fill = hodnota, text = text)) +
+  geom_col(position = "stack", width = 0.6) +
+  scale_fill_manual(values = barvy_fossil, name = NULL) +
+  scale_y_continuous(labels = scales::label_percent(scale = 1, accuracy = 1),
+                     breaks = seq(0, 100, by = 20),
+                     expand = expansion(mult = c(0, 0.01))) +
+  labs(x = NULL, y = NULL) +
+  theme(legend.position  = "bottom",
+        legend.direction = "horizontal",
+        legend.key.size  = unit(0.4, "cm"))
+
+ggplotly(p_fossil, tooltip = "text") |>
+  layout(legend = list(orientation = "h", xanchor = "center",
+                       x = 0.5, y = -0.15, yanchor = "top")) |>
+  config(displayModeBar = TRUE, displaylogo = FALSE,
+         modeBarButtonsToRemove = c("pan2d", "select2d", "lasso2d",
+           "hoverClosestCartesian", "hoverCompareCartesian", "toggleSpikelines"))
 ```
 
 Výsledný dataset obsahuje 220 zemí. Většina zemí je čistými dovozci nebo energeticky neutrálními státy. **Čistý export ropy** byl identifikován u 26 %, **zemního plynu** u 23 % a **uhlí** u 17 % zemí. Celkem bylo jako **exportéři alespoň jednoho** fosilního paliva klasifikováno 40 % zemí. 11 zemí (6,7 %) slouží jako čistí **vývozci všech uvažovaných složek** fosilních paliv, jendá se o Albánii, Kanadu, Kolumbii, Gruzii, Kazachstán, Kyrgyzstán, Myanmar, Nigérii, Rusko, Srbsko a Tádžikistán.
@@ -684,7 +794,7 @@ vybrane <- c(
 ```
 
 ```{r fig-grafy-staty}
-#| fig-height: 18
+#| fig-height: 20
 #| fig-cap: "Kaya dekompozice pro vybrané státy, 1990–2024."
 #| warning: false
 
@@ -703,9 +813,27 @@ legenda    <- cowplot::get_legend(
 )
 grid_plots <- map(plots, \(p) p + theme(legend.position = "none"))
 
-cowplot::plot_grid(
+p_grid <- cowplot::plot_grid(
   cowplot::plot_grid(plotlist = grid_plots, ncol = 2),
   legenda, ncol = 1, rel_heights = c(1, 0.05)
+)
+print(p_grid)
+```
+
+```{r button-grafy-staty-dl}
+#| echo: false
+tmp_png <- tempfile(fileext = ".png")
+ggsave(tmp_png, p_grid, width = 7, height = 21, dpi = 150)
+htmltools::div(
+  style = "text-align: center; margin-bottom: 8px;",
+  downloadthis::download_file(
+    path         = tmp_png,
+    output_name  = "kaya_dekompozice_staty",
+    button_label = "Stáhnout graf (PNG)",
+    button_type  = "default",
+    has_icon     = TRUE,
+    icon         = "fa fa-download"
+  )
 )
 ```
 
@@ -735,22 +863,44 @@ kaya |>
   pivot_longer(c(d_pop, d_gdp_pc, d_ei, d_ci),
                names_to = "faktor", values_to = "hodnota") |>
   mutate(faktor = preloz_faktory(faktor),
-         faktor = factor(faktor, levels = names(barvy_kaya)[1:4])) |>
+         faktor = factor(faktor, levels = rev(names(barvy_kaya)[1:4]))) |>
   ggplot(aes(x = year, y = hodnota, fill = faktor)) +
   geom_col(position = "stack", width = 0.7) +
   geom_line(aes(y = d_co2_actual), color = "#222222") +
   geom_point(aes(y = d_co2_actual, color = "Fosilní CO₂"), size = 1.8) +
   geom_hline(yintercept = 0, linewidth = 0.3, color = "gray40") +
   facet_wrap(~income_group, ncol = 2) +
-  scale_fill_manual(values = barvy_kaya[1:4], name = NULL) +
-  scale_color_manual(values = c("Fosilní CO₂" = "#222222"), name = NULL) +
+  scale_fill_manual(values = barvy_kaya[1:4], breaks = names(barvy_kaya)[1:4],
+                    labels = expression(
+                      "Populace", "HDP/obyvatele", "Energie/HDP", "CO"[2]*"/Energie"
+                    ), name = NULL) +
+  scale_color_manual(values = c("Fosilní CO₂" = "#222222"),
+                     labels = expression("Fosilní CO"[2]), name = NULL) +
   guides(fill  = guide_legend(order = 1, override.aes = list(shape = NA)),
          color = guide_legend(order = 2, override.aes = list(size = 2, linetype = 0, fill = NA))) +
   scale_x_continuous(breaks = seq(1990, 2024, by = 10)) +
   scale_y_continuous(labels = scales::label_percent(scale = 1)) +
   labs(x = NULL, y = "Přírůstek/rok") +
   theme(legend.position = "bottom", legend.key.size = unit(0.4, "cm"),
-        strip.text = element_text(face = "bold"))
+        strip.text = element_text(face = "bold")) -> p_trendy
+p_trendy
+```
+
+```{r button-souhrnne-trendy-dl}
+#| echo: false
+tmp_png <- tempfile(fileext = ".png")
+ggsave(tmp_png, p_trendy, width = 7, dpi = 150)
+htmltools::div(
+  style = "text-align: center; margin-bottom: 8px;",
+  downloadthis::download_file(
+    path         = tmp_png,
+    output_name  = "kaya_prirazeni_skupiny",
+    button_label = "Stáhnout graf (PNG)",
+    button_type  = "default",
+    has_icon     = TRUE,
+    icon         = "fa fa-download"
+  )
+)
 ```
 
 Graf ukazuje výrazné rozdíly v dynamice emisí mezi příjmovými skupinami zemí. Zatímco ve **vysokopříjmových zemích** jsou změny emisí relativně malé a **dlouhodobě tlumené** **poklesem energetické a uhlíkové náročnosti**, v zemích s nižšími příjmy jsou meziroční výkyvy podstatně vyšší. Růst emisí je zde tažen především **populačním růstem a růstem HDP** na obyvatele.
@@ -773,22 +923,44 @@ kaya |>
   pivot_longer(c(d_pop, d_gdp_pc, d_ei, d_ci),
                names_to = "faktor", values_to = "hodnota") |>
   mutate(faktor = preloz_faktory(faktor),
-         faktor = factor(faktor, levels = names(barvy_kaya)[1:4])) |>
+         faktor = factor(faktor, levels = rev(names(barvy_kaya)[1:4]))) |>
   ggplot(aes(x = year, y = hodnota, fill = faktor)) +
   geom_col(position = "stack", width = 0.7) +
   geom_line(aes(y = d_co2_actual), color = "#222222") +
   geom_point(aes(y = d_co2_actual, color = "Fosilní CO₂"), size = 1.8) +
   geom_hline(yintercept = 0, linewidth = 0.3, color = "gray40") +
   facet_wrap(~fossil_role) +
-  scale_fill_manual(values = barvy_kaya[1:4], name = NULL) +
-  scale_color_manual(values = c("Fosilní CO₂" = "#222222"), name = NULL) +
+  scale_fill_manual(values = barvy_kaya[1:4], breaks = names(barvy_kaya)[1:4],
+                    labels = expression(
+                      "Populace", "HDP/obyvatele", "Energie/HDP", "CO"[2]*"/Energie"
+                    ), name = NULL) +
+  scale_color_manual(values = c("Fosilní CO₂" = "#222222"),
+                     labels = expression("Fosilní CO"[2]), name = NULL) +
   guides(fill  = guide_legend(order = 1, override.aes = list(shape = NA)),
          color = guide_legend(order = 2, override.aes = list(size = 2, linetype = 0, fill = NA))) +
   scale_x_continuous(breaks = seq(1990, 2024, by = 10)) +
   scale_y_continuous(labels = scales::label_percent(scale = 1)) +
   labs(x = NULL, y = "Přírůstek/rok") +
   theme(legend.position = "bottom", legend.key.size = unit(0.4, "cm"),
-        strip.text = element_text(face = "bold"))
+        strip.text = element_text(face = "bold")) -> p_exporteri
+p_exporteri
+```
+
+```{r button-exporteri-importeri-dl}
+#| echo: false
+tmp_png <- tempfile(fileext = ".png")
+ggsave(tmp_png, p_exporteri, width = 7, dpi = 150)
+htmltools::div(
+  style = "text-align: center; margin-bottom: 8px;",
+  downloadthis::download_file(
+    path         = tmp_png,
+    output_name  = "kaya_exporteri_importeri",
+    button_label = "Stáhnout graf (PNG)",
+    button_type  = "default",
+    has_icon     = TRUE,
+    icon         = "fa fa-download"
+  )
+)
 ```
 
 Rozdíly mezi exportéry fosilních paliv a dovozci či neutrálními zeměmi nejsou výrazné, přesto lze pozorovat několik odlišností. U **exportérů** je růst emisí častěji **spojen s růstem HDP na obyvatele** a celkově vykazuje vyšší volatilitu. Naopak u **dovozců a neutrálních zemí** hraje významnější roli snižování energetické a uhlíkové náročnosti, které dlouhodobě tlumí růst emisí. Obě skupiny vykazují výrazný propad kolem roku 2020 v důsledku pandemie COVID-19, po němž následovalo rychlé oživení.
@@ -953,7 +1125,25 @@ kaya |>
   scale_x_continuous(breaks = c(1990, 2010)) +
   labs(x = NULL, y = "Index (1990 = 100)", color = NULL) +
   theme(legend.position = "bottom",
-        strip.text = element_text(face = "bold", size = 8))
+        strip.text = element_text(face = "bold", size = 8)) -> p_decoupling
+p_decoupling
+```
+
+```{r button-decoupling-dl}
+#| echo: false
+tmp_png <- tempfile(fileext = ".png")
+ggsave(tmp_png, p_decoupling, width = 7, dpi = 150)
+htmltools::div(
+  style = "text-align: center; margin-bottom: 8px;",
+  downloadthis::download_file(
+    path         = tmp_png,
+    output_name  = "decoupling_index",
+    button_label = "Stáhnout graf (PNG)",
+    button_type  = "default",
+    has_icon     = TRUE,
+    icon         = "fa fa-download"
+  )
+)
 ```
 
 ## Klasifikace decouplingového statusu
@@ -1389,7 +1579,17 @@ Tento vztah je však třeba interpretovat opatrně, protože **úroveň vzdělá
 
 # Clusterová analýza
 
-Clusterová analýza (k-means, `k = 5`) je počítána na čtyřech proměnných – ročních průměrech Kaya faktorů za celé dostupné období (státy s alespoň 20 lety dat). Vstupní proměnné jsou standardizovány (z-score). Skutečná změna CO₂ v clusteru není – slouží jen jako validační proměnná.
+Clusterová analýza (k-means, `k = 5`) je počítána na čtyřech proměnných – ročních průměrech Kaya faktorů za celé dostupné období (státy s alespoň 20 lety dat). Vstupní proměnné jsou standardizovány (`z`-score). Skutečná změna CO₂ v clusteru není – slouží jen jako validační proměnná.
+
+## Nehierarchická shluková analýza ($k$-means)
+
+Pro identifikaci skupin zemí s podobným vývojem faktorů Kaya byla použita **metoda** $k$**-means**. Algoritmus rozděluje pozorování do předem zvoleného počtu shluků $k=5$ tak, aby byla minimalizována variabilita uvnitř shluků a současně maximalizovány rozdíly mezi nimi.
+
+Podobnost mezi zeměmi byla posuzována pomocí **euklidovské vzdálenosti** $\widetilde{d}(\mathbf{x}_{i},\mathbf{x}_{j})=\sqrt{\sum_{m=1}^{p}(x_{im}-x_{jm})^2}$, kde $i, j$ představují dvě pozorování (země), $p$ počet analyzovaných proměnných, $m$ proměnnou.
+
+Na začátku algoritmu je zvoleno $k=5$ počátečních centroidů. Každé pozorování je následně přiřazeno ke shluku, jehož centroid je mu nejblíže, tj. $d(\mathbf{x}_i,\mathbf{t}_j)=\min_{l=1,\dots,k}d(\mathbf{x}_i,\mathbf{t}_l)$. Po přiřazení všech pozorování jsou **centroidy** přepočítány jako průměr všech pozorování v daném shluku $\mathbf{t}_j=\frac{1}{n_j}\sum_{\mathbf{x}_i \in C_j}\mathbf{x}_i$,kde $C_j$ označuje $j$-tý shluk a $n_j$ počet pozorování v tomto shluku. Kroky přiřazení pozorování a přepočtu centroidů se opakují, dokud nedojde ke stabilizaci řešení a zařazení pozorování do shluků se již nemění.
+
+Analýza byla provedena nad standardizovanými hodnotami proměnných `pop_mean`, `gdp_mean`, `ei_mean` a `ci_mean`. Výsledkem je rozdělení zemí do skupin s podobným profilem populačního růstu, ekonomického růstu, energetické náročnosti a emisní intenzity energie.
 
 ```{r cluster-prep}
 cluster_data <- kaya |>
@@ -1406,16 +1606,21 @@ cluster_data <- kaya |>
     .groups  = "drop"
   ) |>
   filter(n_years >= 20) |>
-  left_join(klasifikace |> select(iso_code, income_group, fossil_role, gdp_pc_mean),
+  left_join(klasifikace |> 
+              select(iso_code, income_group, fossil_role, gdp_pc_mean),
             by = "iso_code") |>
-  left_join(klasifikace_kultura |> select(iso_code, jazyk_skupina, nabozenstvi,
-                                          tertiarni_vzdelanost),
+  left_join(klasifikace_kultura |> 
+              select(iso_code, jazyk_skupina, nabozenstvi, tertiarni_vzdelanost),
             by = "iso_code") |>
-  left_join(kaya |> distinct(iso_code, kontinent), by = "iso_code")
+  left_join(kaya |> distinct(iso_code, kontinent), 
+            by = "iso_code")
+```
 
+```{r cluster-data}
+#| code-fold: false
 X <- cluster_data |>
   select(pop_mean, gdp_mean, ei_mean, ci_mean) |>
-  scale()
+  scale() # standardizace
 rownames(X) <- cluster_data$iso_code
 ```
 
@@ -1430,6 +1635,7 @@ fviz_nbclust(X, kmeans, method = "wss") +
 
 ```{r fig-cluster-kmeans}
 #| fig-cap: "Clusterová analýza zemí podle průměrného profilu Kaya faktorů (k-means, k = 5). Zobrazeny první dvě hlavní komponenty (PCA)."
+#| code-fold: false
 set.seed(42)
 k  <- 5
 km <- kmeans(X, centers = k, nstart = 25)
@@ -1458,12 +1664,15 @@ cluster_data |>
   pivot_longer(c(pop_mean, gdp_mean, ei_mean, ci_mean),
                names_to = "faktor", values_to = "hodnota") |>
   mutate(faktor = preloz_faktory(faktor),
-         faktor = factor(faktor, levels = names(barvy_kaya)[1:4])) |>
+         faktor = factor(faktor, levels = rev(names(barvy_kaya)[1:4]))) |>
   ggplot(aes(x = faktor, y = hodnota, fill = faktor)) +
   geom_col() +
   geom_hline(yintercept = 0, linewidth = 0.3) +
   facet_wrap(~cluster, labeller = label_both) +
-  scale_fill_manual(values = barvy_kaya[1:4]) +
+  scale_fill_manual(values = barvy_kaya[1:4], breaks = names(barvy_kaya)[1:4],
+                    labels = expression(
+                      "Populace", "HDP/obyvatele", "Energie/HDP", "CO"[2]*"/Energie"
+                    )) +
   labs(x = NULL, y = "Průměrná roční změna (% /rok)", fill = NULL) +
   theme(legend.position = "none",
         axis.text.x = element_text(angle = 35, hjust = 1))
@@ -1547,22 +1756,44 @@ kaya |>
   pivot_longer(c(d_pop, d_gdp_pc, d_ei, d_ci),
                names_to = "faktor", values_to = "hodnota") |>
   mutate(faktor = preloz_faktory(faktor),
-         faktor = factor(faktor, levels = names(barvy_kaya)[1:4])) |>
+         faktor = factor(faktor, levels = rev(names(barvy_kaya)[1:4]))) |>
   ggplot(aes(x = year, y = hodnota, fill = faktor)) +
   geom_col(position = "stack", width = 0.7) +
   geom_line(aes(y = d_co2_actual), color = "#222222") +
   geom_point(aes(y = d_co2_actual, color = "Fosilní CO₂"), size = 1.8) +
   geom_hline(yintercept = 0, linewidth = 0.3, color = "gray40") +
   facet_wrap(~cluster_label, ncol = 2) +
-  scale_fill_manual(values = barvy_kaya[1:4], name = NULL) +
-  scale_color_manual(values = c("Fosilní CO₂" = "#222222"), name = NULL) +
+  scale_fill_manual(values = barvy_kaya[1:4], breaks = names(barvy_kaya)[1:4],
+                    labels = expression(
+                      "Populace", "HDP/obyvatele", "Energie/HDP", "CO"[2]*"/Energie"
+                    ), name = NULL) +
+  scale_color_manual(values = c("Fosilní CO₂" = "#222222"),
+                     labels = expression("Fosilní CO"[2]), name = NULL) +
   guides(fill  = guide_legend(order = 1, override.aes = list(shape = NA)),
          color = guide_legend(order = 2, override.aes = list(size = 2, linetype = 0, fill = NA))) +
   scale_x_continuous(breaks = seq(1990, 2024, by = 10)) +
   scale_y_continuous(labels = scales::label_percent(scale = 1)) +
   labs(x = NULL, y = "Přírůstek/rok") +
   theme(legend.position = "bottom", legend.key.size = unit(0.4, "cm"),
-        strip.text = element_text(face = "bold"))
+        strip.text = element_text(face = "bold")) -> p_cluster_kaya
+p_cluster_kaya
+```
+
+```{r button-cluster-kaya-dl}
+#| echo: false
+tmp_png <- tempfile(fileext = ".png")
+ggsave(tmp_png, p_cluster_kaya, width = 7, height = 11, dpi = 150)
+htmltools::div(
+  style = "text-align: center; margin-bottom: 8px;",
+  downloadthis::download_file(
+    path         = tmp_png,
+    output_name  = "kaya_clustery",
+    button_label = "Stáhnout graf (PNG)",
+    button_type  = "default",
+    has_icon     = TRUE,
+    icon         = "fa fa-download"
+  )
+)
 ```
 
 <!-- # Česká republika -->
