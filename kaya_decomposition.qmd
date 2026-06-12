@@ -357,14 +357,14 @@ edu_wdi <- if (requireNamespace("WDI", quietly = TRUE)) {
              start = 2010, end = 2019, extra = TRUE) |>
       filter(!is.na(iso3c), region != "Aggregates") |>
       group_by(iso_code = iso3c) |>
-      summarise(tertiarni_vzdelanost = mean(tertiarni, na.rm = TRUE),
+      summarise(terciarni_vzdelanost = mean(tertiarni, na.rm = TRUE),
                        .groups = "drop"),
     error = function(e) tibble::tibble(iso_code = character(),
-                                       tertiarni_vzdelanost = numeric())
+                                       terciarni_vzdelanost = numeric())
   )
 } else {
   message("WDI není nainstalovaný – data vzdělání chybí. Spusť: install.packages('WDI')")
-  tibble::tibble(iso_code = character(), tertiarni_vzdelanost = numeric())
+  tibble::tibble(iso_code = character(), terciarni_vzdelanost = numeric())
 }
 
 klasifikace_kultura <- jazyk_lookup |>
@@ -432,7 +432,11 @@ $$\underbrace{ \ln \text{CO}_2}_{\approx\,\%\Delta\text{CO}_2} \;=\; \underbrace
 
 kde $\Delta \ln X_t = \ln X_t - \ln X_{t-1} = \ln (X_t / X_{t-1})$. Pro malé změny platí $\Delta \ln X \approx \frac{X_t - X_{t-1}}{X_{t-1}}$, tedy přibližně procentní změna. Výsledky jsou vynásobeny 100 a zobrazovány v jednotkách **% / rok**.
 
-Součet čtyř faktorů se přesně nerovná skutečné změně CO₂ – rozdíl tvoří **člen interakcí** (vícerozměrné nelinearity). U přesné LMDI metody interakce zmizí, ale vyžaduje iterativní výpočet. Pro explorativní účely jsou výsledky srovnatelné.
+Součet čtyř faktorů se nemusí přesně rovnat skutečné změně emisí CO₂. Rozdíl tvoří **interakční člen**, který zachycuje nelineární souběh změn jednotlivých faktorů.
+
+$$\text{Interakce} = \Delta \ln \text{CO}_2 - (\Delta \ln P + \Delta \ln \frac{\text{HDP}}{P} + \Delta \ln \frac{E}{\text{HDP}} + \Delta \ln \frac{\text{CO}_2}{E})$$
+
+Ve většině let je tento rozdíl blízký nule, protože při malých meziročních změnách je logaritmická aproximace velmi přesná. Výraznější odchylky se objevují hlavně v letech s náhlými šoky, například během pandemie COVID-19 v roce 2020.
 
 Níže uvedený kód provádí výpočet dekompozice emisí CO₂ podle identity Kaya na úrovni jednotlivých zemí:
 
@@ -615,7 +619,7 @@ income_data <- gdp_pc_ref |>
     pct  = n / sum(n) * 100,
     text = paste0("Příjmová skupina: ", income_group,
                   "<br>Počet zemí: ", n,
-                  "<br>Procento: ", format(round(pct, 2), nsmall = 2), " %")
+                  "<br>Podíl: ", format(round(pct, 2), nsmall = 2), " %")
   )
 
 barvy_income_plot <- c(
@@ -701,7 +705,7 @@ fossil_data <- bind_rows(
     pct  = n / sum(n) * 100,
     text = paste0("Hodnota: ", hodnota,
                   "<br>Počet zemí: ", n,
-                  "<br>Procento: ", format(round(pct, 2), nsmall = 2), " %")
+                  "<br>Podíl: ", format(round(pct, 2), nsmall = 2), " %")
   ) |>
   ungroup() |>
   mutate(hodnota = 
@@ -713,13 +717,13 @@ barvy_fossil <- c(
   "Ano"                  = barvy[5],
   "Ne"                   = barvy[1],
   "Exportér FF"          = barvy[2],
-  "Importér / neutrální" = barvy[6],
+  "Importér / neutrální" = barvy[7],
   "Neuvedeno"            = "#8c8c8c"
 )
 
 p_fossil <- ggplot(fossil_data,
                    aes(x = promena, y = pct, fill = hodnota, text = text)) +
-  geom_col(position = "stack", width = 0.5) +
+  geom_col(position = "stack", width = 0.45) +
   scale_fill_manual(values = barvy_fossil, name = NULL) +
   scale_y_continuous(labels = scales::label_percent(scale = 1, accuracy = 1),
                      breaks = seq(0, 100, by = 20),
@@ -1404,7 +1408,7 @@ cluster_data <- kaya |>
   left_join(klasifikace |> select(iso_code, income_group, fossil_role, gdp_pc_mean),
             by = "iso_code") |>
   left_join(klasifikace_kultura |> select(iso_code, jazyk_skupina, nabozenstvi,
-                                          tertiarni_vzdelanost),
+                                          terciarni_vzdelanost),
             by = "iso_code") |>
   left_join(kaya |> distinct(iso_code, kontinent), by = "iso_code")
 ```
@@ -1424,31 +1428,31 @@ barvy_income <- c(
 )
 
 vzd_data <- cluster_data |>
-  filter(!is.na(tertiarni_vzdelanost), !is.na(co2_mean), !is.na(income_group)) |>
+  filter(!is.na(terciarni_vzdelanost), !is.na(co2_mean), !is.na(income_group)) |>
   mutate(
     popisek = if_else(country %in% c(vybrane, "Czechia"), country, NA_character_),
     text    = country
   )
 
 # Ruční výpočet LM + 95% IS (geom_smooth ribbon ggplotly nepřevádí spolehlivě)
-lm_vzd  <- lm(co2_mean ~ tertiarni_vzdelanost, data = vzd_data)
-lm_seq  <- seq(min(vzd_data$tertiarni_vzdelanost, na.rm = TRUE),
-               max(vzd_data$tertiarni_vzdelanost, na.rm = TRUE),
+lm_vzd  <- lm(co2_mean ~ terciarni_vzdelanost, data = vzd_data)
+lm_seq  <- seq(min(vzd_data$terciarni_vzdelanost, na.rm = TRUE),
+               max(vzd_data$terciarni_vzdelanost, na.rm = TRUE),
                length.out = 200)
 lm_pred <- predict(lm_vzd,
-                   newdata = data.frame(tertiarni_vzdelanost = lm_seq),
+                   newdata = data.frame(terciarni_vzdelanost = lm_seq),
                    interval = "confidence") |>
   as.data.frame() |>
-  mutate(tertiarni_vzdelanost = lm_seq)
+  mutate(terciarni_vzdelanost = lm_seq)
 
 p_vzd <- ggplot(vzd_data,
-                aes(x = tertiarni_vzdelanost, y = co2_mean, color = income_group)) +
+                aes(x = terciarni_vzdelanost, y = co2_mean, color = income_group)) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
   geom_ribbon(data = lm_pred,
-              aes(x = tertiarni_vzdelanost, ymin = lwr, ymax = upr),
+              aes(x = terciarni_vzdelanost, ymin = lwr, ymax = upr),
               inherit.aes = FALSE, fill = "gray30") +
   geom_line(data = lm_pred,
-            aes(x = tertiarni_vzdelanost, y = fit),
+            aes(x = terciarni_vzdelanost, y = fit),
             inherit.aes = FALSE, color = "gray30", linewidth = 0.6, linetype = "dashed") +
   geom_point(aes(text = text, group = income_group), size = 2) +
   scale_color_manual(values = barvy_income) +
@@ -1465,12 +1469,12 @@ vzd_labeled <- vzd_data |>
   filter(!is.na(popisek)) |>
   mutate(barva = barvy_income[income_group])
 
-x_rng2 <- range(vzd_data$tertiarni_vzdelanost, na.rm = TRUE)
+x_rng2 <- range(vzd_data$terciarni_vzdelanost, na.rm = TRUE)
 y_rng2 <- range(vzd_data$co2_mean, na.rm = TRUE)
 chr_w2 <- diff(x_rng2) * 6.5 / 650
 lbl_h2 <- diff(y_rng2) * 16 / 430
 
-lx2 <- vzd_labeled$tertiarni_vzdelanost
+lx2 <- vzd_labeled$terciarni_vzdelanost
 ly2 <- vzd_labeled$co2_mean
 n2  <- nrow(vzd_labeled)
 
@@ -1660,7 +1664,7 @@ cluster_data <- kaya |>
               select(iso_code, income_group, fossil_role, gdp_pc_mean),
             by = "iso_code") |>
   left_join(klasifikace_kultura |> 
-              select(iso_code, jazyk_skupina, nabozenstvi, tertiarni_vzdelanost),
+              select(iso_code, jazyk_skupina, nabozenstvi, terciarni_vzdelanost),
             by = "iso_code") |>
   left_join(kaya |> distinct(iso_code, kontinent), 
             by = "iso_code")
@@ -1808,7 +1812,7 @@ cluster_data |>
     ei_m   = mean(ei_mean,  na.rm = TRUE),
     ci_m   = mean(ci_mean,  na.rm = TRUE),
     co2_m  = mean(co2_mean, na.rm = TRUE),
-    `Terciární vzdělání (% med.)`   = round(median(tertiarni_vzdelanost, na.rm = TRUE), 0),
+    `Terciární vzdělání (% med.)`   = round(median(terciarni_vzdelanost, na.rm = TRUE), 0),
     `Kontinent (%)`                  = {
       tbl <- sort(table(na.omit(kontinent)), decreasing = TRUE)
       paste(paste0(round(as.integer(tbl) / sum(tbl) * 100), "% ", names(tbl)), collapse = ", ")
