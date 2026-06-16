@@ -3,7 +3,9 @@
 Interaktivní analýza rozkladu emisí CO₂ metodou Kaya identity pro vybrané státy světa za období 1990–2024. Projekt byl zpracován v R a Quarto.
 
 **Autoři:** Romana Pejcalová
-**Datum:** červen 2026  
+
+**Datum:** červen 2026
+
 **Interaktivní report:** https://ropej.github.io/kaya-decomposition-2026/
 
 ## Obsah analýzy
